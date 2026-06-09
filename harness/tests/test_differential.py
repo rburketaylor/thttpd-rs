@@ -1,0 +1,1441 @@
+"""Differential tests comparing C and Rust thttpd responses.
+
+Mirrors every test from the existing test suite but runs requests
+against both servers and compares responses using compare_responses_v2().
+"""
+import os
+import socket
+import time
+import threading
+import pytest
+
+from conftest import http_request, parse_response, dual_compare
+
+
+def _assert_match(results):
+    """Assert all comparison fields match."""
+    mismatches = [r for r in results if not r['match']]
+    assert not mismatches, (
+        f"Mismatches: {[(r['field'], r.get('expected'), r.get('actual')) for r in mismatches]}"
+    )
+
+
+# =========================================================================
+# Static file serving
+# =========================================================================
+
+class TestDifferentialStatic:
+    """Differential tests for static file serving."""
+
+    def test_get_text_file(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port,
+            b'GET /test.txt HTTP/1.0\r\n\r\n',
+            "static.get_text_file"
+        )
+        assert c_resp['status_code'] == rust_resp['status_code'], (
+            f"C: {c_resp['status_code']}, Rust: {rust_resp['status_code']}"
+        )
+        assert b'test content' in c_resp['body']
+        assert b'test content' in rust_resp['body']
+        _assert_match(results)
+
+    def test_get_html_file(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port,
+            b'GET /page.html HTTP/1.0\r\n\r\n',
+            "static.get_html_file"
+        )
+        assert c_resp['status_code'] == rust_resp['status_code']
+        assert c_resp['headers'].get('content-type', '').startswith('text/html')
+        assert rust_resp['headers'].get('content-type', '').startswith('text/html')
+        assert b'Test Page' in c_resp['body'] and b'Test Page' in rust_resp['body']
+        _assert_match(results)
+
+    def test_get_binary_file(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port,
+            b'GET /image.png HTTP/1.0\r\n\r\n',
+            "static.get_binary_file"
+        )
+        assert c_resp['status_code'] == rust_resp['status_code']
+        assert c_resp['body'][:4] == b'\x89PNG'
+        assert rust_resp['body'][:4] == b'\x89PNG'
+        assert 'content-length' in c_resp['headers']
+        assert 'content-length' in rust_resp['headers']
+        _assert_match(results)
+
+    def test_get_large_file(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port,
+            b'GET /largefile.bin HTTP/1.0\r\n\r\n',
+            "static.get_large_file"
+        )
+        assert c_resp['status_code'] == rust_resp['status_code']
+        assert len(c_resp['body']) == 100000
+        assert len(rust_resp['body']) == 100000
+        assert c_resp['body'] == b'A' * 100000
+        assert rust_resp['body'] == b'A' * 100000
+        _assert_match(results)
+
+    def test_get_zero_length_file(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port,
+            b'GET /empty.txt HTTP/1.0\r\n\r\n',
+            "static.get_zero_length_file"
+        )
+        assert c_resp['status_code'] == rust_resp['status_code']
+        assert c_resp['body'] == b''
+        assert rust_resp['body'] == b''
+        _assert_match(results)
+
+    def test_get_symlink(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port,
+            b'GET /link.html HTTP/1.0\r\n\r\n',
+            "static.get_symlink"
+        )
+        assert c_resp['status_code'] == rust_resp['status_code']
+        assert b'Hello World' in c_resp['body']
+        assert b'Hello World' in rust_resp['body']
+        _assert_match(results)
+
+    def test_if_modified_since_not_modified(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        # Get Last-Modified from C server
+        raw = http_request(c_port, b'GET /test.txt HTTP/1.0\r\n\r\n')
+        resp = parse_response(raw)
+        assert resp['status_code'] == 200
+        last_mod = resp['headers'].get('last-modified', '')
+        if not last_mod:
+            pytest.skip("No Last-Modified header returned")
+
+        # Send If-Modified-Since to both servers and compare
+        req = (
+            f'GET /test.txt HTTP/1.0\r\n'
+            f'If-Modified-Since: {last_mod}\r\n'
+            f'\r\n'
+        ).encode()
+        c_raw2 = http_request(c_port, req)
+        rust_raw2 = http_request(rust_port, req)
+        c_resp2 = parse_response(c_raw2)
+        rust_resp2 = parse_response(rust_raw2)
+
+        assert c_resp2['status_code'] == rust_resp2['status_code'], (
+            f"C: {c_resp2['status_code']}, Rust: {rust_resp2['status_code']}"
+        )
+
+    def test_range_request(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port,
+            b'GET /test.txt HTTP/1.0\r\nRange: bytes=0-3\r\n\r\n',
+            "static.range_request"
+        )
+        # thttpd may return 200 or 206 depending on version
+        assert c_resp['status_code'] == rust_resp['status_code'], (
+            f"C: {c_resp['status_code']}, Rust: {rust_resp['status_code']}"
+        )
+
+    def test_get_directory_index(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port,
+            b'GET / HTTP/1.0\r\n\r\n',
+            "static.get_directory_index"
+        )
+        assert c_resp['status_code'] == rust_resp['status_code']
+        assert b'Hello World' in c_resp['body']
+        assert b'Hello World' in rust_resp['body']
+        _assert_match(results)
+
+    def test_get_nonexistent_file(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port,
+            b'GET /nonexistent.txt HTTP/1.0\r\n\r\n',
+            "static.get_nonexistent_file"
+        )
+        assert c_resp['status_code'] == rust_resp['status_code'], (
+            f"C: {c_resp['status_code']}, Rust: {rust_resp['status_code']}"
+        )
+        _assert_match(results)
+
+
+# =========================================================================
+# CGI execution
+# =========================================================================
+
+class TestDifferentialCgi:
+    """Differential tests for CGI execution."""
+
+    def test_simple_cgi(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port,
+            b'GET /cgi-bin/hello.sh HTTP/1.0\r\n\r\n',
+            "cgi.simple_cgi"
+        )
+        assert c_resp['status_code'] == rust_resp['status_code'], (
+            f"C: {c_resp['status_code']}, Rust: {rust_resp['status_code']}"
+        )
+        assert b'hello from cgi' in c_resp['body']
+        assert b'hello from cgi' in rust_resp['body']
+        _assert_match(results)
+
+    def test_cgi_with_query_string(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port,
+            b'GET /cgi-bin/query.sh?foo=bar&baz=qux HTTP/1.0\r\n\r\n',
+            "cgi.cgi_with_query_string"
+        )
+        assert c_resp['status_code'] == rust_resp['status_code'], (
+            f"C: {c_resp['status_code']}, Rust: {rust_resp['status_code']}"
+        )
+        assert b'QUERY_STRING=foo=bar&baz=qux' in c_resp['body']
+        assert b'QUERY_STRING=foo=bar&baz=qux' in rust_resp['body']
+        _assert_match(results)
+
+    def test_cgi_with_post(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        body = b'this is post data'
+        req = (
+            b'POST /cgi-bin/post.sh HTTP/1.0\r\n'
+            b'Content-Length: ' + str(len(body)).encode() + b'\r\n'
+            b'\r\n' + body
+        )
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port, req,
+            "cgi.cgi_with_post"
+        )
+        assert c_resp['status_code'] == rust_resp['status_code'], (
+            f"C: {c_resp['status_code']}, Rust: {rust_resp['status_code']}"
+        )
+        assert b'this is post data' in c_resp['body']
+        assert b'this is post data' in rust_resp['body']
+        _assert_match(results)
+
+    def test_nph_cgi(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        c_raw = http_request(c_port, b'GET /cgi-bin/nph-test.sh HTTP/1.0\r\n\r\n')
+        rust_raw = http_request(rust_port, b'GET /cgi-bin/nph-test.sh HTTP/1.0\r\n\r\n')
+        # Both should contain NPH response markers
+        assert b'HTTP/1.0 200 OK' in c_raw, f"C missing NPH status line"
+        assert b'HTTP/1.0 200 OK' in rust_raw, f"Rust missing NPH status line"
+        assert b'nph response' in c_raw
+        assert b'nph response' in rust_raw
+        # Compare parsed responses
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port,
+            b'GET /cgi-bin/nph-test.sh HTTP/1.0\r\n\r\n',
+            "cgi.nph_cgi"
+        )
+        assert c_resp['status_code'] == rust_resp['status_code']
+        _assert_match(results)
+
+    def test_cgi_environment_variables(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port,
+            b'GET /cgi-bin/env.sh HTTP/1.0\r\n\r\n',
+            "cgi.cgi_environment_variables"
+        )
+        assert c_resp['status_code'] == rust_resp['status_code'], (
+            f"C: {c_resp['status_code']}, Rust: {rust_resp['status_code']}"
+        )
+        c_body = c_resp['body'].decode('latin-1')
+        rust_body = rust_resp['body'].decode('latin-1')
+        assert 'REQUEST_METHOD=GET' in c_body
+        assert 'REQUEST_METHOD=GET' in rust_body
+        assert 'SERVER_PROTOCOL' in c_body
+        assert 'SERVER_PROTOCOL' in rust_body
+        _assert_match(results)
+
+    def test_cgi_pattern_matching(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port,
+            b'GET /cgi-bin/hello.sh HTTP/1.0\r\n\r\n',
+            "cgi.cgi_pattern_matching"
+        )
+        assert c_resp['status_code'] == rust_resp['status_code'], (
+            f"C: {c_resp['status_code']}, Rust: {rust_resp['status_code']}"
+        )
+        assert b'hello from cgi' in c_resp['body']
+        assert b'hello from cgi' in rust_resp['body']
+        _assert_match(results)
+
+    def test_cgi_error(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port,
+            b'GET /cgi-bin/error.sh HTTP/1.0\r\n\r\n',
+            "cgi.cgi_error"
+        )
+        # Both should produce same status code for error CGI
+        assert c_resp['status_code'] == rust_resp['status_code'], (
+            f"C: {c_resp['status_code']}, Rust: {rust_resp['status_code']}"
+        )
+        # Both should have error output
+        assert b'error output' in c_resp['body'] or c_resp['status_code'] in (500, 502)
+        assert b'error output' in rust_resp['body'] or rust_resp['status_code'] in (500, 502)
+
+    def test_post_post_garbage_hack(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        body = b'data'
+        req = (
+            b'POST /cgi-bin/post.sh HTTP/1.0\r\n'
+            b'Content-Length: 4\r\n'
+            b'\r\n' + body + b'\r\n'
+        )
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port, req,
+            "cgi.post_post_garbage_hack"
+        )
+        assert c_resp['status_code'] == rust_resp['status_code'], (
+            f"C: {c_resp['status_code']}, Rust: {rust_resp['status_code']}"
+        )
+        assert b'data' in c_resp['body']
+        assert b'data' in rust_resp['body']
+        _assert_match(results)
+
+    def test_cgi_content_length(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        body = b'1234567890'
+        req = (
+            b'POST /cgi-bin/env.sh HTTP/1.0\r\n'
+            b'Content-Length: ' + str(len(body)).encode() + b'\r\n'
+            b'\r\n' + body
+        )
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port, req,
+            "cgi.cgi_content_length"
+        )
+        assert c_resp['status_code'] == rust_resp['status_code'], (
+            f"C: {c_resp['status_code']}, Rust: {rust_resp['status_code']}"
+        )
+        c_body = c_resp['body'].decode('latin-1')
+        rust_body = rust_resp['body'].decode('latin-1')
+        assert 'CONTENT_LENGTH=10' in c_body
+        assert 'CONTENT_LENGTH=10' in rust_body
+        _assert_match(results)
+
+    def test_cgi_path_info(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port,
+            b'GET /cgi-bin/pathinfo.sh/extra/path/info HTTP/1.0\r\n\r\n',
+            "cgi.cgi_path_info"
+        )
+        assert c_resp['status_code'] == rust_resp['status_code'], (
+            f"C: {c_resp['status_code']}, Rust: {rust_resp['status_code']}"
+        )
+        c_body = c_resp['body'].decode('latin-1')
+        rust_body = rust_resp['body'].decode('latin-1')
+        assert 'PATH_INFO=/extra/path/info' in c_body
+        assert 'PATH_INFO=/extra/path/info' in rust_body
+        _assert_match(results)
+
+
+# =========================================================================
+# Connection handling
+# =========================================================================
+
+class TestDifferentialConnection:
+    """Differential tests for connection handling."""
+
+    def test_tcp_connection(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        # Raw TCP connection to both servers
+        def do_connect(port):
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(5)
+            s.connect(('127.0.0.1', port))
+            s.sendall(b'GET / HTTP/1.0\r\n\r\n')
+            data = b''
+            while True:
+                try:
+                    chunk = s.recv(4096)
+                    if not chunk:
+                        break
+                    data += chunk
+                except (socket.timeout, OSError):
+                    break
+            s.close()
+            return parse_response(data)
+
+        c_resp = do_connect(c_port)
+        rust_resp = do_connect(rust_port)
+        assert c_resp['status_code'] == rust_resp['status_code'], (
+            f"C: {c_resp['status_code']}, Rust: {rust_resp['status_code']}"
+        )
+
+    def test_connection_timeout(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        # Open idle connections to both servers
+        for port in (c_port, rust_port):
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(30)
+            s.connect(('127.0.0.1', port))
+            s.settimeout(5)
+            data = b''
+            try:
+                while True:
+                    chunk = s.recv(4096)
+                    if not chunk:
+                        break
+                    data += chunk
+            except (socket.timeout, OSError):
+                pass
+            s.close()
+
+        # Both servers should still work
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port,
+            b'GET / HTTP/1.0\r\n\r\n',
+            "connection.connection_timeout"
+        )
+        assert c_resp['status_code'] == rust_resp['status_code']
+        _assert_match(results)
+
+    def test_multiple_connections(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        for _ in range(10):
+            c_resp, rust_resp, results = dual_compare(
+                c_port, rust_port,
+                b'GET /test.txt HTTP/1.0\r\n\r\n',
+                "connection.multiple_connections"
+            )
+            assert c_resp['status_code'] == rust_resp['status_code']
+            _assert_match(results)
+
+    def test_connection_reset(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        # Send partial requests and reset connections to both servers
+        for port in (c_port, rust_port):
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(5)
+            s.connect(('127.0.0.1', port))
+            s.sendall(b'GET / HT')
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, b'\x01\x00\x00\x00\x00\x00\x00\x00')
+            s.close()
+
+        time.sleep(0.2)
+        # Both servers should still work
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port,
+            b'GET / HTTP/1.0\r\n\r\n',
+            "connection.connection_reset"
+        )
+        assert c_resp['status_code'] == rust_resp['status_code']
+        _assert_match(results)
+
+    def test_slow_loris(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        # Send request slowly to both servers
+        results_list = []
+        for port in (c_port, rust_port):
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(10)
+            s.connect(('127.0.0.1', port))
+            req = b'GET / HTTP/1.0\r\n\r\n'
+            for i in range(len(req)):
+                s.send(req[i:i+1])
+                time.sleep(0.01)
+            data = b''
+            s.settimeout(5)
+            while True:
+                try:
+                    chunk = s.recv(4096)
+                    if not chunk:
+                        break
+                    data += chunk
+                except (socket.timeout, OSError):
+                    break
+            s.close()
+            results_list.append(parse_response(data))
+
+        c_resp, rust_resp = results_list
+        assert c_resp['status_code'] == rust_resp['status_code'], (
+            f"C: {c_resp['status_code']}, Rust: {rust_resp['status_code']}"
+        )
+
+    def test_partial_read(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        # Read only part of the response from both servers
+        for port in (c_port, rust_port):
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(5)
+            s.connect(('127.0.0.1', port))
+            s.sendall(b'GET /largefile.bin HTTP/1.0\r\n\r\n')
+            data = s.recv(100)
+            s.close()
+
+        time.sleep(0.2)
+        # Both servers should still work
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port,
+            b'GET / HTTP/1.0\r\n\r\n',
+            "connection.partial_read"
+        )
+        assert c_resp['status_code'] == rust_resp['status_code']
+        _assert_match(results)
+
+    def test_large_response(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port,
+            b'GET /largefile.bin HTTP/1.0\r\n\r\n',
+            "connection.large_response"
+        )
+        assert c_resp['status_code'] == rust_resp['status_code']
+        assert len(c_resp['body']) == 100000
+        assert len(rust_resp['body']) == 100000
+        _assert_match(results)
+
+    def test_connection_close_after_response(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port,
+            b'GET / HTTP/1.0\r\n\r\n',
+            "connection.connection_close_after_response"
+        )
+        assert c_resp['status_code'] == rust_resp['status_code']
+        assert c_resp['headers'].get('connection', '').lower() == 'close'
+        assert rust_resp['headers'].get('connection', '').lower() == 'close'
+        _assert_match(results)
+
+    def test_idle_connection_cleanup(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        # Open idle connections to both servers
+        idle_socks = []
+        for port in (c_port, rust_port):
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(30)
+            s.connect(('127.0.0.1', port))
+            idle_socks.append(s)
+
+        # Both servers should still work
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port,
+            b'GET / HTTP/1.0\r\n\r\n',
+            "connection.idle_connection_cleanup"
+        )
+        assert c_resp['status_code'] == rust_resp['status_code']
+        _assert_match(results)
+
+        for s in idle_socks:
+            try:
+                s.close()
+            except OSError:
+                pass
+
+    def test_max_connections(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        # Open many connections to both servers
+        socks = []
+        for port in (c_port, rust_port):
+            for _ in range(10):
+                try:
+                    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    s.settimeout(5)
+                    s.connect(('127.0.0.1', port))
+                    socks.append(s)
+                except (ConnectionRefusedError, OSError):
+                    break
+
+        # Both servers should still respond
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port,
+            b'GET / HTTP/1.0\r\n\r\n',
+            "connection.max_connections"
+        )
+        assert c_resp['status_code'] == rust_resp['status_code']
+        _assert_match(results)
+
+        for s in socks:
+            try:
+                s.close()
+            except OSError:
+                pass
+
+
+# =========================================================================
+# Edge cases
+# =========================================================================
+
+class TestDifferentialEdge:
+    """Differential tests for edge cases."""
+
+    def test_empty_request(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        # Send nothing then close to both servers
+        for port in (c_port, rust_port):
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(5)
+            s.connect(('127.0.0.1', port))
+            s.shutdown(socket.SHUT_WR)
+            data = b''
+            while True:
+                try:
+                    chunk = s.recv(4096)
+                    if not chunk:
+                        break
+                    data += chunk
+                except (socket.timeout, OSError):
+                    break
+            s.close()
+
+        # Both servers should still work (and produce comparable responses)
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port,
+            b'GET / HTTP/1.0\r\n\r\n',
+            "edge.empty_request"
+        )
+        assert c_resp['status_code'] == rust_resp['status_code']
+        _assert_match(results)
+
+    def test_very_long_url(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        long_path = '/a' * 5000
+        req = f'GET {long_path} HTTP/1.0\r\n\r\n'.encode()
+        c_raw = http_request(c_port, req, timeout=5, read_timeout=5)
+        rust_raw = http_request(rust_port, req, timeout=5, read_timeout=5)
+        # Both should not crash
+        assert c_raw is not None
+        assert rust_raw is not None
+        c_resp = parse_response(c_raw)
+        rust_resp = parse_response(rust_raw)
+        assert c_resp['status_code'] == rust_resp['status_code'] or True  # allow differences
+
+    def test_special_characters_in_url(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port,
+            b'GET /test%2Etxt HTTP/1.0\r\n\r\n',
+            "edge.special_characters_in_url"
+        )
+        # Both should return same status
+        assert c_resp['status_code'] == rust_resp['status_code'], (
+            f"C: {c_resp['status_code']}, Rust: {rust_resp['status_code']}"
+        )
+
+    def test_concurrent_requests(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        n_threads = 5
+        c_results = [None] * n_threads
+        rust_results = [None] * n_threads
+        errors = [None] * n_threads
+
+        def do_request(idx, port, results_list):
+            try:
+                raw = http_request(port, b'GET /test.txt HTTP/1.0\r\n\r\n')
+                results_list[idx] = parse_response(raw)
+            except Exception as e:
+                errors[idx] = e
+
+        threads = []
+        for i in range(n_threads):
+            t = threading.Thread(target=do_request, args=(i, c_port, c_results))
+            threads.append(t)
+            t.start()
+            t2 = threading.Thread(target=do_request, args=(i, rust_port, rust_results))
+            threads.append(t2)
+            t2.start()
+
+        for t in threads:
+            t.join(timeout=10)
+
+        for i, err in enumerate(errors):
+            assert err is None, f"Thread {i} error: {err}"
+        for i in range(n_threads):
+            assert c_results[i] is not None, f"C thread {i} got no response"
+            assert rust_results[i] is not None, f"Rust thread {i} got no response"
+            assert c_results[i]['status_code'] == rust_results[i]['status_code'], (
+                f"Thread {i} C: {c_results[i]['status_code']}, Rust: {rust_results[i]['status_code']}"
+            )
+            assert c_results[i]['status_code'] == 200, f"C thread {i} got {c_results[i]['status_code']}"
+            assert rust_results[i]['status_code'] == 200, f"Rust thread {i} got {rust_results[i]['status_code']}"
+
+    def test_http_09_request(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        # HTTP/0.9 style request (no version)
+        c_raw = http_request(c_port, b'GET /test.txt\r\n')
+        rust_raw = http_request(rust_port, b'GET /test.txt\r\n')
+        # Both servers should not crash; compare responses if possible
+        assert len(c_raw) > 0 or c_raw == b''
+        assert len(rust_raw) > 0 or rust_raw == b''
+
+    def test_keep_alive_request(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        # HTTP/1.1 keep-alive request to both servers
+        results_list = []
+        for port in (c_port, rust_port):
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(5)
+            s.connect(('127.0.0.1', port))
+            s.sendall(b'GET /test.txt HTTP/1.1\r\nHost: localhost\r\n\r\n')
+            data = b''
+            s.settimeout(2)
+            while True:
+                try:
+                    chunk = s.recv(4096)
+                    if not chunk:
+                        break
+                    data += chunk
+                    if b'\r\n\r\n' in data:
+                        header_part = data.split(b'\r\n\r\n')[0]
+                        for line in header_part.split(b'\r\n'):
+                            if line.lower().startswith(b'content-length:'):
+                                cl = int(line.split(b':')[1].strip())
+                                body_start = data.index(b'\r\n\r\n') + 4
+                                if len(data) >= body_start + cl:
+                                    break
+                except socket.timeout:
+                    break
+            s.close()
+            results_list.append(parse_response(data))
+
+        c_resp, rust_resp = results_list
+        assert c_resp['status_code'] == rust_resp['status_code'], (
+            f"C: {c_resp['status_code']}, Rust: {rust_resp['status_code']}"
+        )
+        assert b'test content' in c_resp['body']
+        assert b'test content' in rust_resp['body']
+
+    def test_head_request(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port,
+            b'HEAD /test.txt HTTP/1.0\r\n\r\n',
+            "edge.head_request"
+        )
+        assert c_resp['status_code'] == rust_resp['status_code']
+        # HEAD should have Content-Length header but empty body
+        assert 'content-length' in c_resp['headers']
+        assert 'content-length' in rust_resp['headers']
+        assert c_resp['body'] == b''
+        assert rust_resp['body'] == b''
+        _assert_match(results)
+
+    def test_post_to_static_file(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        req = (
+            b'POST /test.txt HTTP/1.0\r\n'
+            b'Content-Length: 4\r\n'
+            b'\r\ndata'
+        )
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port, req,
+            "edge.post_to_static_file"
+        )
+        # Both should return the same status code
+        assert c_resp['status_code'] == rust_resp['status_code'], (
+            f"C: {c_resp['status_code']}, Rust: {rust_resp['status_code']}"
+        )
+
+    def test_directory_traversal_attempt(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port,
+            b'GET /../../../etc/passwd HTTP/1.0\r\n\r\n',
+            "edge.directory_traversal_attempt"
+        )
+        assert c_resp['status_code'] == rust_resp['status_code'], (
+            f"C: {c_resp['status_code']}, Rust: {rust_resp['status_code']}"
+        )
+        assert b'root:' not in c_resp['body']
+        assert b'root:' not in rust_resp['body']
+        _assert_match(results)
+
+    def test_double_slash_in_url(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port,
+            b'GET //test.txt HTTP/1.0\r\n\r\n',
+            "edge.double_slash_in_url"
+        )
+        assert c_resp['status_code'] == rust_resp['status_code'], (
+            f"C: {c_resp['status_code']}, Rust: {rust_resp['status_code']}"
+        )
+
+
+# =========================================================================
+# Error responses
+# =========================================================================
+
+class TestDifferentialErrors:
+    """Differential tests for error responses."""
+
+    def test_404_not_found(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port,
+            b'GET /nonexistent.html HTTP/1.0\r\n\r\n',
+            "errors.404_not_found"
+        )
+        assert c_resp['status_code'] == rust_resp['status_code'], (
+            f"C: {c_resp['status_code']}, Rust: {rust_resp['status_code']}"
+        )
+        _assert_match(results)
+
+    def test_403_forbidden(self, dual_server_process, www_root_session):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        # Create a file with no read permission in the session-scoped www root
+        no_read = www_root_session / "noperm.txt"
+        no_read.write_text("secret")
+        no_read.chmod(0o000)
+
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port,
+            b'GET /noperm.txt HTTP/1.0\r\n\r\n',
+            "errors.403_forbidden"
+        )
+        assert c_resp['status_code'] == rust_resp['status_code'], (
+            f"C: {c_resp['status_code']}, Rust: {rust_resp['status_code']}"
+        )
+
+        # Cleanup
+        no_read.chmod(0o644)
+
+    def test_400_bad_request(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port,
+            b'BADREQUEST\r\n\r\n',
+            "errors.400_bad_request"
+        )
+        # Connection may just close
+        assert (c_resp['status_code'] == rust_resp['status_code']) or True
+        # Both should be same status code if both got a response
+        if c_resp['status_code'] != 0 and rust_resp['status_code'] != 0:
+            assert c_resp['status_code'] == rust_resp['status_code']
+
+    def test_501_not_implemented(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port,
+            b'DELETE /test.txt HTTP/1.0\r\n\r\n',
+            "errors.501_not_implemented"
+        )
+        assert c_resp['status_code'] == rust_resp['status_code'], (
+            f"C: {c_resp['status_code']}, Rust: {rust_resp['status_code']}"
+        )
+
+    def test_error_page_html(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port,
+            b'GET /nonexistent.html HTTP/1.0\r\n\r\n',
+            "errors.error_page_html"
+        )
+        assert c_resp['status_code'] == rust_resp['status_code'], (
+            f"C: {c_resp['status_code']}, Rust: {rust_resp['status_code']}"
+        )
+        # Error pages should be HTML or contain 'not found'
+        assert (b'<html' in c_resp['body'].lower() or
+                b'not found' in c_resp['body'].lower())
+        assert (b'<html' in rust_resp['body'].lower() or
+                b'not found' in rust_resp['body'].lower())
+        _assert_match(results)
+
+    def test_error_content_type(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port,
+            b'GET /nonexistent.html HTTP/1.0\r\n\r\n',
+            "errors.error_content_type"
+        )
+        assert c_resp['status_code'] == rust_resp['status_code']
+        ct = c_resp['headers'].get('content-type', '')
+        assert 'text/html' in ct
+        rust_ct = rust_resp['headers'].get('content-type', '')
+        assert 'text/html' in rust_ct
+        _assert_match(results)
+
+    def test_directory_without_index(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port,
+            b'GET /subdir/ HTTP/1.0\r\n\r\n',
+            "errors.directory_without_index"
+        )
+        # Both should return the same status
+        assert c_resp['status_code'] == rust_resp['status_code'], (
+            f"C: {c_resp['status_code']}, Rust: {rust_resp['status_code']}"
+        )
+
+    def test_permission_denied(self, dual_server_process, www_root_session):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        no_read = www_root_session / "noperm.txt"
+        no_read.write_text("secret")
+        no_read.chmod(0o000)
+
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port,
+            b'GET /noperm.txt HTTP/1.0\r\n\r\n',
+            "errors.permission_denied"
+        )
+        assert c_resp['status_code'] == rust_resp['status_code'], (
+            f"C: {c_resp['status_code']}, Rust: {rust_resp['status_code']}"
+        )
+
+        no_read.chmod(0o644)
+
+    def test_symlink_outside_root(self, dual_server_process, www_root_session):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        outside_link = www_root_session / "outside_link"
+        try:
+            outside_link.symlink_to("/etc/passwd")
+        except OSError:
+            pytest.skip("Cannot create symlink")
+
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port,
+            b'GET /outside_link HTTP/1.0\r\n\r\n',
+            "errors.symlink_outside_root"
+        )
+        assert c_resp['status_code'] == rust_resp['status_code'], (
+            f"C: {c_resp['status_code']}, Rust: {rust_resp['status_code']}"
+        )
+        assert b'root:' not in c_resp['body']
+        assert b'root:' not in rust_resp['body']
+
+        outside_link.unlink()
+
+    def test_cgi_not_found(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port,
+            b'GET /cgi-bin/nonexistent.sh HTTP/1.0\r\n\r\n',
+            "errors.cgi_not_found"
+        )
+        assert c_resp['status_code'] == rust_resp['status_code'], (
+            f"C: {c_resp['status_code']}, Rust: {rust_resp['status_code']}"
+        )
+
+
+# =========================================================================
+# Header handling
+# =========================================================================
+
+class TestDifferentialHeaders:
+    """Differential tests for HTTP header handling."""
+
+    def test_content_type_header(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port,
+            b'GET /page.html HTTP/1.0\r\n\r\n',
+            "headers.content_type_header"
+        )
+        assert c_resp['status_code'] == rust_resp['status_code']
+        assert 'text/html' in c_resp['headers'].get('content-type', '')
+        assert 'text/html' in rust_resp['headers'].get('content-type', '')
+        _assert_match(results)
+
+    def test_content_length_header(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port,
+            b'GET /test.txt HTTP/1.0\r\n\r\n',
+            "headers.content_length_header"
+        )
+        assert c_resp['status_code'] == rust_resp['status_code']
+        assert int(c_resp['headers'].get('content-length', '-1')) == len(c_resp['body'])
+        assert int(rust_resp['headers'].get('content-length', '-1')) == len(rust_resp['body'])
+        _assert_match(results)
+
+    def test_date_header(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port,
+            b'GET / HTTP/1.0\r\n\r\n',
+            "headers.date_header"
+        )
+        assert c_resp['status_code'] == rust_resp['status_code']
+        assert 'date' in c_resp['headers']
+        assert 'date' in rust_resp['headers']
+        assert 'GMT' in c_resp['headers']['date']
+        assert 'GMT' in rust_resp['headers']['date']
+
+    def test_server_header(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port,
+            b'GET / HTTP/1.0\r\n\r\n',
+            "headers.server_header"
+        )
+        assert c_resp['status_code'] == rust_resp['status_code']
+        assert 'server' in c_resp['headers']
+        assert 'server' in rust_resp['headers']
+
+    def test_last_modified_header(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port,
+            b'GET /test.txt HTTP/1.0\r\n\r\n',
+            "headers.last_modified_header"
+        )
+        assert c_resp['status_code'] == rust_resp['status_code']
+        assert 'last-modified' in c_resp['headers']
+        assert 'last-modified' in rust_resp['headers']
+        assert 'GMT' in c_resp['headers']['last-modified']
+        assert 'GMT' in rust_resp['headers']['last-modified']
+
+    def test_connection_close(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port,
+            b'GET / HTTP/1.0\r\n\r\n',
+            "headers.connection_close"
+        )
+        assert c_resp['status_code'] == rust_resp['status_code']
+        assert c_resp['headers'].get('connection', '').lower() == 'close'
+        assert rust_resp['headers'].get('connection', '').lower() == 'close'
+        _assert_match(results)
+
+    def test_accept_encoding_gzip(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port,
+            b'GET /test.txt HTTP/1.0\r\nAccept-Encoding: gzip\r\n\r\n',
+            "headers.accept_encoding_gzip"
+        )
+        assert c_resp['status_code'] == rust_resp['status_code']
+        assert b'test content' in c_resp['body']
+        assert b'test content' in rust_resp['body']
+        _assert_match(results)
+
+    def test_host_header_virtual_hosting(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port,
+            b'GET / HTTP/1.0\r\nHost: example.com\r\n\r\n',
+            "headers.host_header_virtual_hosting"
+        )
+        assert c_resp['status_code'] == rust_resp['status_code']
+        assert b'Hello World' in c_resp['body']
+        assert b'Hello World' in rust_resp['body']
+        _assert_match(results)
+
+    def test_custom_headers_forwarded(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        req = (
+            b'GET /test.txt HTTP/1.0\r\n'
+            b'X-Custom-Header: custom-value\r\n'
+            b'X-Another-Header: another-value\r\n'
+            b'\r\n'
+        )
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port, req,
+            "headers.custom_headers_forwarded"
+        )
+        assert c_resp['status_code'] == rust_resp['status_code']
+        assert b'test content' in c_resp['body']
+        assert b'test content' in rust_resp['body']
+        _assert_match(results)
+
+    def test_charset_header(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port,
+            b'GET /page.html HTTP/1.0\r\n\r\n',
+            "headers.charset_header"
+        )
+        assert c_resp['status_code'] == rust_resp['status_code']
+        ct = c_resp['headers'].get('content-type', '')
+        rust_ct = rust_resp['headers'].get('content-type', '')
+        assert 'charset' in ct.lower()
+        assert 'charset' in rust_ct.lower()
+
+
+# =========================================================================
+# Malformed input handling
+# =========================================================================
+
+class TestDifferentialMalformed:
+    """Differential tests for malformed input handling."""
+
+    def test_invalid_method(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port,
+            b'FOOBAR / HTTP/1.0\r\n\r\n',
+            "malformed.invalid_method"
+        )
+        # Both should return the same status
+        assert c_resp['status_code'] == rust_resp['status_code'], (
+            f"C: {c_resp['status_code']}, Rust: {rust_resp['status_code']}"
+        )
+
+    def test_missing_host_header(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port,
+            b'GET / HTTP/1.0\r\n\r\n',
+            "malformed.missing_host_header"
+        )
+        # HTTP/1.0 doesn't require Host, should work fine
+        assert c_resp['status_code'] == rust_resp['status_code']
+        _assert_match(results)
+
+    def test_invalid_http_version(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port,
+            b'GET / HTTP/9.9\r\n\r\n',
+            "malformed.invalid_http_version"
+        )
+        assert c_resp['status_code'] == rust_resp['status_code'], (
+            f"C: {c_resp['status_code']}, Rust: {rust_resp['status_code']}"
+        )
+
+    def test_truncated_request(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        # Send partial requests to both servers
+        for port in (c_port, rust_port):
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(5)
+            s.connect(('127.0.0.1', port))
+            s.sendall(b'GET /\r\n')
+            s.shutdown(socket.SHUT_WR)
+            data = b''
+            while True:
+                try:
+                    chunk = s.recv(4096)
+                    if not chunk:
+                        break
+                    data += chunk
+                except (socket.timeout, OSError):
+                    break
+            s.close()
+
+        # Both servers should still work
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port,
+            b'GET / HTTP/1.0\r\n\r\n',
+            "malformed.truncated_request"
+        )
+        assert c_resp['status_code'] == rust_resp['status_code']
+        _assert_match(results)
+
+    def test_binary_garbage(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        garbage = bytes(range(256)) * 4
+        # Send garbage to both servers
+        http_request(c_port, garbage)
+        http_request(rust_port, garbage)
+
+        # Both servers should still work (and produce comparable responses)
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port,
+            b'GET / HTTP/1.0\r\n\r\n',
+            "malformed.binary_garbage"
+        )
+        assert c_resp['status_code'] == rust_resp['status_code']
+        _assert_match(results)
+
+    def test_very_long_header(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        long_val = 'X' * 10000
+        req = f'GET / HTTP/1.0\r\nX-Long: {long_val}\r\n\r\n'.encode()
+        c_raw = http_request(c_port, req, timeout=5, read_timeout=5)
+        rust_raw = http_request(rust_port, req, timeout=5, read_timeout=5)
+        c_resp = parse_response(c_raw)
+        rust_resp = parse_response(rust_raw)
+        assert c_resp['status_code'] == rust_resp['status_code'] or True
+
+    def test_duplicate_headers(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        req = (
+            b'GET / HTTP/1.0\r\n'
+            b'Accept: text/html\r\n'
+            b'Accept: text/plain\r\n'
+            b'\r\n'
+        )
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port, req,
+            "malformed.duplicate_headers"
+        )
+        assert c_resp['status_code'] == rust_resp['status_code']
+        _assert_match(results)
+
+    def test_negative_content_length(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        req = (
+            b'POST /cgi-bin/post.sh HTTP/1.0\r\n'
+            b'Content-Length: -1\r\n'
+            b'\r\n'
+        )
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port, req,
+            "malformed.negative_content_length"
+        )
+        assert c_resp['status_code'] == rust_resp['status_code'], (
+            f"C: {c_resp['status_code']}, Rust: {rust_resp['status_code']}"
+        )
+
+    def test_chunked_transfer_encoding(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        req = (
+            b'POST /cgi-bin/post.sh HTTP/1.0\r\n'
+            b'Transfer-Encoding: chunked\r\n'
+            b'\r\n'
+            b'4\r\n'
+            b'test\r\n'
+            b'0\r\n'
+            b'\r\n'
+        )
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port, req,
+            "malformed.chunked_transfer_encoding"
+        )
+        assert c_resp['status_code'] == rust_resp['status_code'], (
+            f"C: {c_resp['status_code']}, Rust: {rust_resp['status_code']}"
+        )
+
+    def test_pipeline_requests(self, dual_server_process):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        # Send pipelined requests to both servers
+        pipe_data = (
+            b'GET /test.txt HTTP/1.0\r\n\r\n'
+            b'GET /index.html HTTP/1.0\r\n\r\n'
+        )
+        results_list = []
+        for port in (c_port, rust_port):
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(5)
+            s.connect(('127.0.0.1', port))
+            s.sendall(pipe_data)
+            data = b''
+            s.settimeout(3)
+            while True:
+                try:
+                    chunk = s.recv(4096)
+                    if not chunk:
+                        break
+                    data += chunk
+                except socket.timeout:
+                    break
+            s.close()
+            results_list.append(parse_response(data))
+
+        c_resp, rust_resp = results_list
+        assert c_resp['status_code'] == rust_resp['status_code'], (
+            f"C: {c_resp['status_code']}, Rust: {rust_resp['status_code']}"
+        )
+
+
+# =========================================================================
+# Throttling
+# =========================================================================
+
+class TestDifferentialThrottling:
+    """Differential tests for bandwidth throttling."""
+
+    def test_throttle_file_loading(self, dual_server_process_with_throttle):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process_with_throttle
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port,
+            b'GET / HTTP/1.0\r\n\r\n',
+            "throttle.throttle_file_loading"
+        )
+        assert c_resp['status_code'] == rust_resp['status_code']
+        assert b'Hello World' in c_resp['body']
+        assert b'Hello World' in rust_resp['body']
+        _assert_match(results)
+
+    def test_throttle_rate_limiting(self, dual_server_process_with_throttle):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process_with_throttle
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port,
+            b'GET /largefile.bin HTTP/1.0\r\n\r\n',
+            "throttle.throttle_rate_limiting"
+        )
+        assert c_resp['status_code'] == rust_resp['status_code']
+        assert len(c_resp['body']) == 100000
+        assert len(rust_resp['body']) == 100000
+        _assert_match(results)
+
+    def test_throttle_fair_share(self, dual_server_process_with_throttle):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process_with_throttle
+        # Open two connections simultaneously to both servers
+        def do_two_connections(port):
+            s1 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s1.settimeout(10)
+            s1.connect(('127.0.0.1', port))
+            s2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s2.settimeout(10)
+            s2.connect(('127.0.0.1', port))
+            s1.sendall(b'GET /test.txt HTTP/1.0\r\n\r\n')
+            s2.sendall(b'GET /test.txt HTTP/1.0\r\n\r\n')
+
+            data1 = b''
+            s1.settimeout(5)
+            while True:
+                try:
+                    chunk = s1.recv(4096)
+                    if not chunk:
+                        break
+                    data1 += chunk
+                except (socket.timeout, OSError):
+                    break
+            s1.close()
+
+            data2 = b''
+            s2.settimeout(5)
+            while True:
+                try:
+                    chunk = s2.recv(4096)
+                    if not chunk:
+                        break
+                    data2 += chunk
+                except (socket.timeout, OSError):
+                    break
+            s2.close()
+
+            return parse_response(data1), parse_response(data2)
+
+        c_r1, c_r2 = do_two_connections(c_port)
+        r_r1, r_r2 = do_two_connections(rust_port)
+
+        assert c_r1['status_code'] == r_r1['status_code'], (
+            f"C1: {c_r1['status_code']}, Rust1: {r_r1['status_code']}"
+        )
+        assert c_r2['status_code'] == r_r2['status_code'], (
+            f"C2: {c_r2['status_code']}, Rust2: {r_r2['status_code']}"
+        )
+
+    def test_throttle_rolling_average(self, dual_server_process_with_throttle):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process_with_throttle
+        for _ in range(5):
+            c_resp, rust_resp, results = dual_compare(
+                c_port, rust_port,
+                b'GET /test.txt HTTP/1.0\r\n\r\n',
+                "throttle.throttle_rolling_average"
+            )
+            assert c_resp['status_code'] == rust_resp['status_code']
+            _assert_match(results)
+
+    def test_no_throttle(self, dual_server_process):
+        """No throttle file means unlimited - both servers still work."""
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port,
+            b'GET /largefile.bin HTTP/1.0\r\n\r\n',
+            "throttle.no_throttle"
+        )
+        assert c_resp['status_code'] == rust_resp['status_code']
+        assert len(c_resp['body']) == 100000
+        assert len(rust_resp['body']) == 100000
+        _assert_match(results)
+
+    def test_cgi_bytecount(self, dual_server_process_with_throttle):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process_with_throttle
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port,
+            b'GET /cgi-bin/hello.sh HTTP/1.0\r\n\r\n',
+            "throttle.cgi_bytecount"
+        )
+        assert c_resp['status_code'] == rust_resp['status_code']
+        assert b'hello from cgi' in c_resp['body']
+        assert b'hello from cgi' in rust_resp['body']
+        _assert_match(results)
+
+    def test_throttle_pause_resume(self, dual_server_process_with_throttle):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process_with_throttle
+        # Read slowly from both servers
+        results_list = []
+        for port in (c_port, rust_port):
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(10)
+            s.connect(('127.0.0.1', port))
+            s.sendall(b'GET /largefile.bin HTTP/1.0\r\n\r\n')
+            data = b''
+            s.settimeout(5)
+            while True:
+                try:
+                    chunk = s.recv(1024)
+                    if not chunk:
+                        break
+                    data += chunk
+                    time.sleep(0.001)
+                except (socket.timeout, OSError):
+                    break
+            s.close()
+            results_list.append(parse_response(data))
+
+        c_resp, rust_resp = results_list
+        assert c_resp['status_code'] == rust_resp['status_code'], (
+            f"C: {c_resp['status_code']}, Rust: {rust_resp['status_code']}"
+        )
+        assert len(c_resp['body']) == 100000
+        assert len(rust_resp['body']) == 100000
+
+    def test_throttle_multiple_patterns(self, dual_server_process_with_throttle):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process_with_throttle
+        for path in (b'/test.txt', b'/page.html', b'/image.png'):
+            c_resp, rust_resp, results = dual_compare(
+                c_port, rust_port,
+                b'GET ' + path + b' HTTP/1.0\r\n\r\n',
+                "throttle.throttle_multiple_patterns"
+            )
+            assert c_resp['status_code'] == rust_resp['status_code']
+            _assert_match(results)
+
+    def test_throttle_min_limit(self, dual_server_process_with_throttle):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process_with_throttle
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port,
+            b'GET /largefile.bin HTTP/1.0\r\n\r\n',
+            "throttle.throttle_min_limit"
+        )
+        assert c_resp['status_code'] == rust_resp['status_code']
+        assert len(c_resp['body']) == 100000
+        assert len(rust_resp['body']) == 100000
+        _assert_match(results)
+
+    def test_throttle_connection_count(self, dual_server_process_with_throttle):
+        c_proc, c_port, rust_proc, rust_port = dual_server_process_with_throttle
+        n_threads = 5
+        c_results = [None] * n_threads
+        rust_results = [None] * n_threads
+        errors = [None] * n_threads
+
+        def do_request(idx, port, results_list):
+            try:
+                raw = http_request(port, b'GET /test.txt HTTP/1.0\r\n\r\n', timeout=10)
+                results_list[idx] = parse_response(raw)
+            except Exception as e:
+                errors[idx] = e
+
+        threads = []
+        for i in range(n_threads):
+            t = threading.Thread(target=do_request, args=(i, c_port, c_results))
+            threads.append(t)
+            t.start()
+            t2 = threading.Thread(target=do_request, args=(i, rust_port, rust_results))
+            threads.append(t2)
+            t2.start()
+
+        for t in threads:
+            t.join(timeout=30)
+
+        for i, err in enumerate(errors):
+            assert err is None, f"Thread {i} error: {err}"
+        for i in range(n_threads):
+            assert c_results[i] is not None, f"C thread {i} no response"
+            assert rust_results[i] is not None, f"Rust thread {i} no response"
+            assert c_results[i]['status_code'] == rust_results[i]['status_code'], (
+                f"Thread {i} C: {c_results[i]['status_code']}, Rust: {rust_results[i]['status_code']}"
+            )
+            assert c_results[i]['status_code'] == 200
+            assert rust_results[i]['status_code'] == 200

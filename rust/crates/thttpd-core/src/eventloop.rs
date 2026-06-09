@@ -289,6 +289,32 @@ fn process_request(server: &mut Server, slab_key: usize) {
         }
     }
 
+    // Validate HTTP version — reject anything other than HTTP/1.0 or HTTP/1.1
+    if has_version {
+        let bad_version = {
+            let v = &server.conns[slab_key].http.http_version;
+            v != "HTTP/1.0" && v != "HTTP/1.1"
+        };
+        if bad_version {
+            let v = server.conns[slab_key].http.http_version.clone();
+            let body = error_page(400, "Bad Request", "Your request has bad syntax or is inherently impossible to satisfy.\n", &v);
+            let http_ref = &server.conns[slab_key].http;
+            let response = build_full_response(http_ref, 400, "Bad Request", "text/html", -1, 0, &[]);
+            let full_response = if http_ref.mime_flag {
+                let mut r = response;
+                r.extend_from_slice(&body);
+                r
+            } else {
+                body
+            };
+            let slot = &mut server.conns[slab_key];
+            slot.http.response = full_response;
+            slot.http.response_len = slot.http.response.len();
+            transition_to_sending(server, slab_key);
+            return;
+        }
+    }
+
     // Unknown method → 501
     if server.conns[slab_key].http.method == Method::Unknown {
         let method_str = {
@@ -853,11 +879,14 @@ fn dispatch_cgi(server: &mut Server, slab_key: usize, _script_path: &Path) {
     let env = thttpd_http::cgi::build_envp(&ctx, &resolved_script, cgi_pattern_str);
 
     // Read POST body if present
+    // C passes the raw socket fd to CGI, so cat reads ALL remaining data
+    // including any trailing bytes beyond Content-Length.  Match that.
     let post_body = server.conns.get(slab_key).and_then(|slot| {
         slot.http.content_length.and_then(|len| {
             let body_start = slot.http.checked_idx;
             if body_start + (len as usize) <= slot.http.read_idx {
-                Some(slot.http.read_buf[body_start..body_start + (len as usize)].to_vec())
+                // Include everything buffered after headers (not just Content-Length)
+                Some(slot.http.read_buf[body_start..slot.http.read_idx].to_vec())
             } else {
                 None
             }
