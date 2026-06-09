@@ -1,0 +1,25 @@
+[package]
+name = "thttpd-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "thttpd"
+path = "src/main.rs"
+
+[dependencies]
+thttpd-http = { workspace = true }
+thttpd-fdwatch = { workspace = true }
+thttpd-timers = { workspace = true }
+thttpd-mmc = { workspace = true }
+thttpd-match = { workspace = true }
+thttpd-mime = { workspace = true }
+thttpd-tdate = { workspace = true }
+clap = { workspace = true }
+mio = { workspace = true }
+signal-hook = { workspace = true }
+signal-hook-mio = { workspace = true }
+nix = { workspace = true }
+slab = { workspace = true }

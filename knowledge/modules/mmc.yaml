@@ -1,0 +1,4 @@
+name: mmc
+source: legacy/src/mmc.c
+status: pending
+dependencies: []

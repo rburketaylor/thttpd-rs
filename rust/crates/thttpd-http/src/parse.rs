@@ -1,0 +1,147 @@
+//! Request parsing for thttpd.
+//! Translates `legacy/src/libhttpd.c:1769-1925` incremental FSM parser.
+
+use crate::method::Method;
+use crate::parse_state::{GotRequest, ParseState};
+
+/// Run the request-detection FSM over new data in `read_buf`.
+/// `checked_idx` is where we left off; `read_idx` is end of valid data.
+/// Returns (result, new_checked_idx, final_state).
+pub fn got_request(read_buf: &[u8], mut checked_idx: usize, read_idx: usize) -> (GotRequest, usize, ParseState) {
+    let mut state = ParseState::FirstWord;
+
+    while checked_idx < read_idx {
+        let c = read_buf[checked_idx];
+
+        state = match state {
+            ParseState::FirstWord => match c {
+                b' ' | b'\t' => ParseState::FirstWs,
+                b'\r' | b'\n' => {
+                    // C: CR/LF before a complete word is malformed
+                    return (GotRequest::BadRequest, checked_idx, ParseState::Bogus);
+                }
+                _ => ParseState::FirstWord,
+            },
+            ParseState::FirstWs => match c {
+                b' ' | b'\t' => ParseState::FirstWs,
+                _ => ParseState::SecondWord,
+            },
+            ParseState::SecondWord => match c {
+                b' ' | b'\t' => ParseState::SecondWs,
+                b'\r' | b'\n' => {
+                    // HTTP/0.9: two-word request
+                    return (GotRequest::GotRequest, checked_idx + 1, ParseState::GotRequest);
+                }
+                _ => ParseState::SecondWord,
+            },
+            ParseState::SecondWs => match c {
+                b' ' | b'\t' => ParseState::SecondWs,
+                _ => ParseState::ThirdWord,
+            },
+            ParseState::ThirdWord => match c {
+                b' ' | b'\t' => ParseState::ThirdWs,
+                b'\r' => ParseState::Cr,
+                b'\n' => ParseState::Lf,
+                _ => ParseState::ThirdWord,
+            },
+            ParseState::ThirdWs => match c {
+                b'\r' => ParseState::Cr,
+                b'\n' => ParseState::Lf,
+                _ => ParseState::ThirdWs,
+            },
+            ParseState::Lf => match c {
+                b'\r' => ParseState::Crlf,
+                b'\n' => return (GotRequest::GotRequest, checked_idx + 1, ParseState::GotRequest),
+                _ => ParseState::Line,
+            },
+            ParseState::Cr => match c {
+                b'\n' => ParseState::Crlf,
+                // C: any non-LF after CR transitions to LINE (not Bogus)
+                _ => ParseState::Line,
+            },
+            ParseState::Crlf => match c {
+                b'\r' => ParseState::Crlfcr,
+                b'\n' => return (GotRequest::GotRequest, checked_idx + 1, ParseState::GotRequest),
+                _ => ParseState::Line,
+            },
+            ParseState::Line => match c {
+                b'\r' => ParseState::Cr,
+                b'\n' => ParseState::Lf,
+                _ => ParseState::Line,
+            },
+            ParseState::Crlfcr => match c {
+                b'\n' => return (GotRequest::GotRequest, checked_idx + 1, ParseState::GotRequest),
+                // C: any non-LF after CRLF+CR transitions to LINE (not Bogus)
+                _ => ParseState::Line,
+            },
+            ParseState::GotRequest | ParseState::Bogus => {
+                return (GotRequest::NoRequest, checked_idx, state);
+            }
+        };
+
+        checked_idx += 1;
+    }
+
+    (GotRequest::NoRequest, checked_idx, state)
+}
+
+/// Parse method from the first word of the request line.
+pub fn parse_method(read_buf: &[u8], end: usize) -> Method {
+    let word: Vec<u8> = read_buf[..end]
+        .iter()
+        .take_while(|&&b| b != b' ' && b != b'\t')
+        .copied()
+        .collect();
+    Method::from_str(&String::from_utf8_lossy(&word))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_simple_get() {
+        let buf = b"GET / HTTP/1.0\r\n\r\n";
+        let (result, _, _) = got_request(buf, 0, buf.len());
+        assert_eq!(result, GotRequest::GotRequest);
+    }
+
+    #[test]
+    fn test_incomplete_request() {
+        let buf = b"GET / HTTP/1.0\r\n";
+        let (result, _, _) = got_request(buf, 0, buf.len());
+        assert_eq!(result, GotRequest::NoRequest);
+    }
+
+    #[test]
+    fn test_http09_two_word() {
+        let buf = b"GET /\r\n";
+        let (result, _, _) = got_request(buf, 0, buf.len());
+        assert_eq!(result, GotRequest::GotRequest);
+    }
+
+    #[test]
+    fn test_bad_request() {
+        let buf = b"GET / HTTP/1.0\r\n\rX";
+        let (result, _, _) = got_request(buf, 0, buf.len());
+        // After CRLF+CR, non-LF goes to Line state — not Bogus.
+        // A truly bad request is one with CR/LF in FirstWord.
+        let buf2 = b"\rGET / HTTP/1.0\r\n\r\n";
+        let (result2, _, _) = got_request(buf2, 0, buf2.len());
+        assert_eq!(result2, GotRequest::BadRequest);
+    }
+
+    #[test]
+    fn test_headers_with_body() {
+        let buf = b"GET / HTTP/1.0\r\nHost: localhost\r\n\r\n";
+        let (result, _, _) = got_request(buf, 0, buf.len());
+        assert_eq!(result, GotRequest::GotRequest);
+    }
+
+    #[test]
+    fn test_parse_method() {
+        assert_eq!(parse_method(b"GET / HTTP/1.0\r\n", 14), Method::Get);
+        assert_eq!(parse_method(b"POST / HTTP/1.0\r\n", 15), Method::Post);
+        assert_eq!(parse_method(b"HEAD / HTTP/1.0\r\n", 15), Method::Head);
+    }
+}

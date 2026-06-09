@@ -1,0 +1,4 @@
+name: tdate_parse
+source: legacy/src/tdate_parse.c
+status: pending
+dependencies: []

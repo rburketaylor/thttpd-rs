@@ -1,0 +1,4 @@
+name: libhttpd
+source: legacy/src/libhttpd.c
+status: pending
+dependencies: []

@@ -1,0 +1,43 @@
+# Migration Map
+# Maps C source modules to Rust crate equivalents
+
+migrations:
+  - c_module: match.c
+    rust_crate: thttpd-match
+    status: migrated
+    notes: "Direct translation. Pattern syntax preserved."
+
+  - c_module: mime_types.h
+    rust_crate: thttpd-mime
+    status: migrated
+    notes: "Static tables converted to match statements."
+
+  - c_module: tdate_parse.c
+    rust_crate: thttpd-tdate
+    status: migrated
+    notes: "Date parsing with epoch calculation."
+
+  - c_module: fdwatch.c
+    rust_crate: thttpd-fdwatch
+    status: migrated
+    notes: "Thin mio wrapper. Token constants for dispatch."
+
+  - c_module: timers.c
+    rust_crate: thttpd-timers
+    status: migrated
+    notes: "BinaryHeap replaces hash-of-sorted-lists."
+
+  - c_module: mmc.c
+    rust_crate: thttpd-mmc
+    status: migrated
+    notes: "Rc<Mmap> for reference counting. HashMap for cache."
+
+  - c_module: libhttpd.c
+    rust_crate: thttpd-http
+    status: migrated
+    notes: "Split into parse, response, cgi, dirlist, conn modules."
+
+  - c_module: thttpd.c
+    rust_crate: thttpd-core
+    status: migrated
+    notes: "Event loop, startup, signal handling, throttling."

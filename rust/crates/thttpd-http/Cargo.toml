@@ -1,0 +1,16 @@
+[package]
+name = "thttpd-http"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+thttpd-match = { workspace = true }
+thttpd-tdate = { workspace = true }
+thttpd-mmc = { workspace = true }
+memmap2 = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

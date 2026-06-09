@@ -1,0 +1,7 @@
+/target
+rust/target/
+__pycache__/
+*.o
+legacy/src/thttpd
+harness/golden/baseline.json
+*.pyc

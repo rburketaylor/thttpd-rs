@@ -1,0 +1,4 @@
+name: thttpd
+source: legacy/src/thttpd.c
+status: pending
+dependencies: []

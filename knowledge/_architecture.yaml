@@ -1,0 +1,21 @@
+# thttpd Architecture
+
+## Overview
+sthttpd 2.27.0 (thttpd) is a simple, small, portable, fast, and secure HTTP server.
+
+## Components
+- **thttpd.c**: Main server — event loop, connection management, startup/shutdown
+- **libhttpd.c/h**: HTTP protocol library — parsing, response building, CGI, directory listing
+- **fdwatch.c/h**: I/O multiplexing abstraction (poll/select)
+- **timers.c/h**: Timer wheel for connection timeouts and periodic tasks
+- **mmc.c/h**: Memory-mapped file cache with reference counting
+- **match.c/h**: Shell-style glob matching for CGI patterns
+- **tdate_parse.c/h**: HTTP date parsing (RFC 1123, RFC 850, asctime)
+
+## Data Flow
+1. Event loop polls for I/O events via fdwatch
+2. New connections accepted and added to connection table
+3. Request data read and parsed incrementally via FSM
+4. Static files served via mmap cache
+5. CGI scripts executed via fork/exec
+6. Responses sent via writev (buffer + file body)

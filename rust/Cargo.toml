@@ -1,0 +1,38 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/thttpd-core",
+    "crates/thttpd-http",
+    "crates/thttpd-fdwatch",
+    "crates/thttpd-timers",
+    "crates/thttpd-mmc",
+    "crates/thttpd-match",
+    "crates/thttpd-tdate",
+    "crates/thttpd-mime",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "BSD-2-Clause"
+rust-version = "1.85"
+
+[workspace.dependencies]
+thttpd-core = { path = "crates/thttpd-core" }
+thttpd-http = { path = "crates/thttpd-http" }
+thttpd-fdwatch = { path = "crates/thttpd-fdwatch" }
+thttpd-timers = { path = "crates/thttpd-timers" }
+thttpd-mmc = { path = "crates/thttpd-mmc" }
+thttpd-match = { path = "crates/thttpd-match" }
+thttpd-tdate = { path = "crates/thttpd-tdate" }
+thttpd-mime = { path = "crates/thttpd-mime" }
+
+mio = { version = "1", features = ["os-poll", "os-ext", "net"] }
+memmap2 = "0.9"
+thiserror = "2"
+signal-hook = "0.3"
+signal-hook-mio = "0.2"
+nix = { version = "0.29", features = ["signal", "process", "fs", "user", "net", "hostname"] }
+clap = { version = "4", features = ["derive"] }
+slab = "0.4"
+tempfile = "3"

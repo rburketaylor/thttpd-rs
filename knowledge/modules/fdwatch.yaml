@@ -1,0 +1,4 @@
+name: fdwatch
+source: legacy/src/fdwatch.c
+status: pending
+dependencies: []

@@ -1,0 +1,29 @@
+modules:
+  - name: match
+    source: legacy/src/match.c
+    status: pending
+    dependencies: []
+  - name: libhttpd
+    source: legacy/src/libhttpd.c
+    status: pending
+    dependencies: [match, mmc, tdate_parse]
+  - name: thttpd
+    source: legacy/src/thttpd.c
+    status: pending
+    dependencies: [libhttpd, fdwatch, timers, mmc]
+  - name: fdwatch
+    source: legacy/src/fdwatch.c
+    status: pending
+    dependencies: []
+  - name: timers
+    source: legacy/src/timers.c
+    status: pending
+    dependencies: []
+  - name: mmc
+    source: legacy/src/mmc.c
+    status: pending
+    dependencies: []
+  - name: tdate_parse
+    source: legacy/src/tdate_parse.c
+    status: pending
+    dependencies: []
