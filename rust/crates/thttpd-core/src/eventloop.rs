@@ -10,11 +10,11 @@ use thttpd_fdwatch::{conn_token, is_listen_token, slab_key_from_token, Events, I
 use thttpd_http::conn::ConnState;
 use thttpd_http::parse::{got_request, parse_method};
 use thttpd_http::parse_state::GotRequest;
-use thttpd_http::response::{error_page, ResponseBuilder};
+use thttpd_http::response::{build_full_response, error_page, ResponseBuilder};
+use thttpd_http::Method;
 use thttpd_http::url::{normalize_path, percent_decode};
 use thttpd_match::match_pattern;
 use thttpd_mime::mime_type;
-use thttpd_tdate::format_http_date;
 use std::time::Duration;
 
 /// Maximum number of connections we accept.
@@ -22,6 +22,9 @@ const MAX_CONNECTIONS: usize = 4096;
 
 /// Size of the read buffer per connection — matches C's 60000.
 const READ_BUF_SIZE: usize = 60000;
+
+/// Maximum URL length before returning 500 Internal Error (matches C behavior).
+const MAX_URL_LENGTH: usize = 10000;
 
 /// Run the main event loop until termination.
 pub fn run(server: &mut Server) -> io::Result<()> {
@@ -172,7 +175,7 @@ fn handle_read(server: &mut Server, slab_key: usize) -> io::Result<()> {
         let slot = &server.conns[slab_key];
         let buf_remaining = READ_BUF_SIZE - slot.http.read_idx;
         if buf_remaining == 0 {
-            let response = build_error_response(400, "Bad Request", None);
+            let response = build_error_response(400, "Bad Request", "");
             let slot = &mut server.conns[slab_key];
             slot.http.response = response;
             slot.http.response_len = slot.http.response.len();
@@ -226,7 +229,7 @@ fn handle_read(server: &mut Server, slab_key: usize) -> io::Result<()> {
     match result {
         GotRequest::NoRequest => Ok(()),
         GotRequest::BadRequest => {
-            let response = build_error_response(400, "Bad Request", None);
+            let response = build_error_response(400, "Bad Request", "");
             let slot = &mut server.conns[slab_key];
             slot.http.response = response;
             slot.http.response_len = slot.http.response.len();
@@ -242,8 +245,8 @@ fn handle_read(server: &mut Server, slab_key: usize) -> io::Result<()> {
 
 /// Process a complete HTTP request.
 fn process_request(server: &mut Server, slab_key: usize) {
-    // Parse request line and host header
-    let (url_str, version_str, host_str) = {
+    // Parse request line
+    let (url_str, version_str, host_str, has_version) = {
         let slot = &server.conns[slab_key];
         let http = &slot.http;
         let buf = &http.read_buf[..http.checked_idx];
@@ -254,28 +257,160 @@ fn process_request(server: &mut Server, slab_key: usize) {
 
         let _method_str = parts.next().unwrap_or("GET");
         let url = parts.next().unwrap_or("/").to_string();
-        let version = parts.next().unwrap_or("HTTP/1.0").to_string();
+        let version = parts.next().map(|v| v.to_string());
 
         let header_start = buf.iter().position(|&b| b == b'\n').map(|p| p + 1).unwrap_or(0);
         let headers_bytes = &buf[header_start..];
         let host = extract_header(headers_bytes, "Host").unwrap_or_default();
 
-        (url, version, host)
+        (url, version.clone().unwrap_or_else(|| "HTTP/0.9".to_string()), host, version.is_some())
     };
 
-    // Update the HttpConn fields
+    // Parse method
+    let method = {
+        let slot = &server.conns[slab_key];
+        parse_method(&slot.http.read_buf, slot.http.checked_idx)
+    };
+
+    // Update HttpConn fields
     {
         let slot = &mut server.conns[slab_key];
-        slot.http.method = parse_method(&slot.http.read_buf, slot.http.checked_idx);
+        slot.http.method = method;
         slot.http.http_version = version_str;
         slot.http.encoded_url = url_str.clone();
-        slot.http.host = host_str.clone();
+        slot.http.host = host_str;
+        slot.http.mime_flag = has_version; // HTTP/0.9 when no version token
 
         slot.http.decoded_url = percent_decode(&url_str);
 
         if let Some(qpos) = slot.http.decoded_url.find('?') {
             slot.http.query = slot.http.decoded_url[qpos + 1..].to_string();
             slot.http.decoded_url.truncate(qpos);
+        }
+    }
+
+    // Unknown method → 501
+    if server.conns[slab_key].http.method == Method::Unknown {
+        let method_str = {
+            let slot = &server.conns[slab_key];
+            let buf = &slot.http.read_buf[..slot.http.checked_idx];
+            let request_line_end = buf.iter().position(|&b| b == b'\r').unwrap_or(buf.len());
+            let request_line = String::from_utf8_lossy(&buf[..request_line_end]);
+            request_line.split_whitespace().next().unwrap_or("UNKNOWN").to_string()
+        };
+        let body = error_page(501, "Not Implemented", "The requested method '%.80s' is not implemented by this server.\n", &method_str);
+        let http_ref = &server.conns[slab_key].http;
+        let response = build_full_response(http_ref, 501, "Not Implemented", "text/html", -1, 0, &[]);
+        let full_response = if http_ref.mime_flag {
+            let mut r = response;
+            r.extend_from_slice(&body);
+            r
+        } else {
+            body
+        };
+        let slot = &mut server.conns[slab_key];
+        slot.http.response = full_response;
+        slot.http.response_len = slot.http.response.len();
+        transition_to_sending(server, slab_key);
+        return;
+    }
+
+    // Parse request headers
+    {
+        let slot = &mut server.conns[slab_key];
+        let buf = &slot.http.read_buf[..slot.http.checked_idx];
+        let header_start = buf.iter().position(|&b| b == b'\n').map(|p| p + 1).unwrap_or(0);
+        let headers_bytes = &buf[header_start..];
+
+        // If-Modified-Since
+        if let Some(ims_str) = extract_header(headers_bytes, "If-Modified-Since") {
+            slot.http.if_modified_since = thttpd_tdate::parse_http_date(&ims_str);
+        }
+
+        // Range: bytes=N-M
+        if let Some(range_str) = extract_header(headers_bytes, "Range") {
+            if !range_str.contains(',') {
+                if let Some(eq_pos) = range_str.find('=') {
+                    let range_spec = &range_str[eq_pos + 1..];
+                    if let Some(dash_pos) = range_spec.find('-') {
+                        if dash_pos > 0 {
+                            let first_str = &range_spec[..dash_pos];
+                            if let Ok(first) = first_str.parse::<i64>() {
+                                slot.http.got_range = true;
+                                slot.http.first_byte_index = if first < 0 { 0 } else { first };
+                                if dash_pos + 1 < range_spec.len() {
+                                    let rest = &range_spec[dash_pos + 1..];
+                                    if let Ok(last) = rest.parse::<i64>() {
+                                        slot.http.last_byte_index = if last < 0 { -1 } else { last };
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Content-Type
+        if let Some(ct) = extract_header(headers_bytes, "Content-Type") {
+            slot.http.content_type = ct;
+        }
+
+        // Content-Length
+        if let Some(cl_str) = extract_header(headers_bytes, "Content-Length") {
+            slot.http.content_length = cl_str.trim().parse::<i64>().ok();
+        }
+
+        // User-Agent
+        if let Some(ua) = extract_header(headers_bytes, "User-Agent") {
+            slot.http.user_agent = ua;
+        }
+
+        // Referer
+        if let Some(refr) = extract_header(headers_bytes, "Referer") {
+            slot.http.referer = refr;
+        }
+
+        // Accept
+        if let Some(acc) = extract_header(headers_bytes, "Accept") {
+            slot.http.accept = acc;
+        }
+
+        // Accept-Encoding
+        if let Some(ae) = extract_header(headers_bytes, "Accept-Encoding") {
+            slot.http.accept_encoding = ae;
+        }
+
+        // Cookie
+        if let Some(ck) = extract_header(headers_bytes, "Cookie") {
+            slot.http.cookie = ck;
+        }
+
+        // Authorization
+        if let Some(auth) = extract_header(headers_bytes, "Authorization") {
+            slot.http.authorization = auth;
+        }
+    }
+
+    // URL length limit
+    {
+        let slot = &server.conns[slab_key];
+        if slot.http.encoded_url.len() > MAX_URL_LENGTH {
+            let body = error_page(500, "Internal Error", "There was an unusual problem serving the requested URL '%.80s'.\n", &slot.http.encoded_url);
+            let http_ref = &server.conns[slab_key].http;
+            let response = build_full_response(http_ref, 500, "Internal Error", "text/html", -1, 0, &[]);
+            let full_response = if http_ref.mime_flag {
+                let mut r = response;
+                r.extend_from_slice(&body);
+                r
+            } else {
+                body
+            };
+            let slot = &mut server.conns[slab_key];
+            slot.http.response = full_response;
+            slot.http.response_len = slot.http.response.len();
+            transition_to_sending(server, slab_key);
+            return;
         }
     }
 
@@ -287,9 +422,25 @@ fn process_request(server: &mut Server, slab_key: usize) {
         let normalized = match normalize_path(decoded) {
             Some(p) => p,
             None => {
-                let response = build_error_response(403, "Forbidden", None);
+                // normalize_path returns None for directory traversal (..)
+                // Check for // separately (returns 400 Bad Request)
+                let (status, title, form_msg) = if decoded.contains("//") {
+                    (400, "Bad Request", "Your request has bad syntax or is inherently impossible to satisfy.\n")
+                } else {
+                    (404, "Not Found", "The requested URL '%.80s' was not found on this server.\n")
+                };
+                let body = error_page(status, title, form_msg, decoded);
+                let http_ref = &server.conns[slab_key].http;
+                let response = build_full_response(http_ref, status, title, "text/html", -1, 0, &[]);
+                let full_response = if http_ref.mime_flag {
+                    let mut r = response;
+                    r.extend_from_slice(&body);
+                    r
+                } else {
+                    body
+                };
                 let slot = &mut server.conns[slab_key];
-                slot.http.response = response;
+                slot.http.response = full_response;
                 slot.http.response_len = slot.http.response.len();
                 transition_to_sending(server, slab_key);
                 return;
@@ -308,11 +459,32 @@ fn process_request(server: &mut Server, slab_key: usize) {
         path
     };
 
-    // Check CGI pattern
+    // Check CGI pattern — try progressively shorter prefixes to handle PATH_INFO
     let is_cgi = {
         let slot = &server.conns[slab_key];
         match &server.config.cgi_pattern {
-            Some(pattern) => match_pattern(pattern, &slot.http.orig_filename),
+            Some(pattern) => {
+                let orig = &slot.http.orig_filename;
+                // First try the full URL
+                if match_pattern(pattern, orig) {
+                    true
+                } else {
+                    // Try stripping path components from right (PATH_INFO extraction)
+                    let mut test = orig.as_str();
+                    let mut found_cgi = false;
+                    while let Some(last_slash) = test.rfind('/') {
+                        if last_slash == 0 {
+                            break;
+                        }
+                        test = &test[..last_slash];
+                        if match_pattern(pattern, test) {
+                            found_cgi = true;
+                            break;
+                        }
+                    }
+                    found_cgi
+                }
+            }
             None => false,
         }
     };
@@ -328,30 +500,109 @@ fn process_request(server: &mut Server, slab_key: usize) {
 
 /// Serve a static file.
 fn serve_static(server: &mut Server, slab_key: usize, file_path: &Path) {
-    // Check if the path is a directory — generate listing
-    if file_path.is_dir() {
+    // --- Symlink escape prevention ---
+    let file_path = {
+        let canonical_root = match std::fs::canonicalize(&server.config.dir) {
+            Ok(p) => p,
+            Err(_) => {
+                let body = error_page(500, "Internal Error", "There was an unusual problem serving the requested URL '%.80s'.\n", &server.config.dir.to_string_lossy());
+                let http_ref = &server.conns[slab_key].http;
+                let response = build_full_response(http_ref, 500, "Internal Error", "text/html", -1, 0, &[]);
+                let full_response = if http_ref.mime_flag { let mut r = response; r.extend_from_slice(&body); r } else { body };
+                let slot = &mut server.conns[slab_key];
+                slot.http.response = full_response;
+                slot.http.response_len = slot.http.response.len();
+                transition_to_sending(server, slab_key);
+                return;
+            }
+        };
+        match std::fs::canonicalize(file_path) {
+            Ok(canonical) => {
+                if !canonical.starts_with(&canonical_root) {
+                    let url = server.conns[slab_key].http.encoded_url.clone();
+                    let body = error_page(403, "Forbidden", "The requested URL '%.80s' resolves to a file outside the permitted web server directory tree.\n", &url);
+                    let http_ref = &server.conns[slab_key].http;
+                    let response = build_full_response(http_ref, 403, "Forbidden", "text/html", -1, 0, &[]);
+                    let full_response = if http_ref.mime_flag { let mut r = response; r.extend_from_slice(&body); r } else { body };
+                    let slot = &mut server.conns[slab_key];
+                    slot.http.response = full_response;
+                    slot.http.response_len = slot.http.response.len();
+                    transition_to_sending(server, slab_key);
+                    return;
+                }
+                canonical
+            }
+            Err(_) => file_path.to_path_buf()
+        }
+    };
+
+    // --- Permission / existence check ---
+    let metadata = match std::fs::metadata(&file_path) {
+        Ok(m) => m,
+        Err(e) => {
+            let url = server.conns[slab_key].http.encoded_url.clone();
+            // For very long filenames (ENAMETOOLONG) return 500, matching C behavior
+            let (status, title) = if e.kind() == std::io::ErrorKind::NotFound {
+                (404, "Not Found")
+            } else if file_path.components().any(|c| {
+                if let std::path::Component::Normal(os_str) = c {
+                    os_str.len() > 255
+                } else {
+                    false
+                }
+            }) {
+                (500, "Internal Error")
+            } else {
+                (403, "Forbidden")
+            };
+            let form_msg = if status == 500 {
+                "There was an unusual problem serving the requested URL '%.80s'.\n"
+            } else if status == 404 {
+                "The requested URL '%.80s' was not found on this server.\n"
+            } else {
+                "The requested URL '%.80s' is not accessible.\n"
+            };
+            let body = error_page(status, title, form_msg, &url);
+            let http_ref = &server.conns[slab_key].http;
+            let response = build_full_response(http_ref, status, title, "text/html", -1, 0, &[]);
+            let full_response = if http_ref.mime_flag { let mut r = response; r.extend_from_slice(&body); r } else { body };
+            let slot = &mut server.conns[slab_key];
+            slot.http.response = full_response;
+            slot.http.response_len = slot.http.response.len();
+            transition_to_sending(server, slab_key);
+            return;
+        }
+    };
+
+    // Directory listing
+    if metadata.is_dir() {
         let url_path = server.conns[slab_key].http.orig_filename.clone();
         let dir = file_path.to_path_buf();
+        let mtime = metadata.modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
 
         match thttpd_http::dirlist::generate_listing(&dir, &url_path) {
             Ok(body) => {
-                let response = ResponseBuilder::new()
-                    .status(200, "OK")
-                    .header("Content-Type", "text/html")
-                    .header("Content-Length", &body.len().to_string())
-                    .body(body)
-                    .build();
+                let http_ref = &server.conns[slab_key].http;
+                let response = build_full_response(http_ref, 200, "OK", "text/html", -1, mtime, &[]);
+                let full_response = if http_ref.mime_flag { let mut r = response; r.extend_from_slice(&body); r } else { body };
                 let slot = &mut server.conns[slab_key];
-                slot.http.response = response;
+                slot.http.response = full_response;
                 slot.http.response_len = slot.http.response.len();
                 transition_to_sending(server, slab_key);
                 return;
             }
             Err(e) => {
                 eprintln!("thttpd: directory listing error: {e}");
-                let response = build_error_response(500, "Internal Server Error", None);
+                let body = error_page(500, "Internal Error", "There was an unusual problem serving the requested URL '%.80s'.\n", &file_path.to_string_lossy());
+                let http_ref = &server.conns[slab_key].http;
+                let response = build_full_response(http_ref, 500, "Internal Error", "text/html", -1, 0, &[]);
+                let full_response = if http_ref.mime_flag { let mut r = response; r.extend_from_slice(&body); r } else { body };
                 let slot = &mut server.conns[slab_key];
-                slot.http.response = response;
+                slot.http.response = full_response;
                 slot.http.response_len = slot.http.response.len();
                 transition_to_sending(server, slab_key);
                 return;
@@ -359,52 +610,121 @@ fn serve_static(server: &mut Server, slab_key: usize, file_path: &Path) {
         }
     }
 
-    // Try to mmap the file
+    // Check world-readable permission (Unix mode bits)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = metadata.permissions().mode();
+        if (mode & 0o004) == 0 {
+            let url = server.conns[slab_key].http.encoded_url.clone();
+            let body = error_page(403, "Forbidden", "The requested URL '%.80s' resolves to a file that is not world-readable.\n", &url);
+            let http_ref = &server.conns[slab_key].http;
+            let response = build_full_response(http_ref, 403, "Forbidden", "text/html", -1, 0, &[]);
+            let full_response = if http_ref.mime_flag { let mut r = response; r.extend_from_slice(&body); r } else { body };
+            let slot = &mut server.conns[slab_key];
+            slot.http.response = full_response;
+            slot.http.response_len = slot.http.response.len();
+            transition_to_sending(server, slab_key);
+            return;
+        }
+    }
+
+    let file_size = metadata.len() as i64;
+    let file_mtime = metadata.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    // Fill in last_byte_index if needed
+    {
+        let slot = &mut server.conns[slab_key];
+        if slot.http.got_range {
+            if slot.http.last_byte_index == -1 || slot.http.last_byte_index >= file_size {
+                slot.http.last_byte_index = file_size - 1;
+            }
+        }
+    }
+
+    let method = server.conns[slab_key].http.method;
+
+    // --- HEAD: headers with Content-Length but no body ---
+    if method == Method::Head {
+        let http_ref = &server.conns[slab_key].http;
+        let filename = file_path.to_string_lossy();
+        let content_type = mime_type(&filename);
+        let response = build_full_response(http_ref, 200, "OK", content_type, file_size, file_mtime, &[]);
+        let full_response = if http_ref.mime_flag { response } else { Vec::new() };
+        let slot = &mut server.conns[slab_key];
+        slot.http.response = full_response;
+        slot.http.response_len = slot.http.response.len();
+        slot.http.status_code = 200;
+        transition_to_sending(server, slab_key);
+        return;
+    }
+
+    // --- If-Modified-Since: 304 ---
+    if let Some(ims) = server.conns[slab_key].http.if_modified_since {
+        if ims >= file_mtime {
+            let http_ref = &server.conns[slab_key].http;
+            let filename = file_path.to_string_lossy();
+            let content_type = mime_type(&filename);
+            let response = build_full_response(http_ref, 304, "Not Modified", content_type, -1, file_mtime, &[]);
+            let full_response = if http_ref.mime_flag { response } else { Vec::new() };
+            let slot = &mut server.conns[slab_key];
+            slot.http.response = full_response;
+            slot.http.response_len = slot.http.response.len();
+            slot.http.status_code = 304;
+            transition_to_sending(server, slab_key);
+            return;
+        }
+    }
+
+    // --- GET: mmap and serve ---
     let file_path_owned = file_path.to_path_buf();
     let mmap_result = server.mmc.map(&file_path_owned);
 
     match mmap_result {
         Ok(mmap) => {
-            let body = mmap.to_vec();
             let filename = file_path.to_string_lossy();
             let content_type = mime_type(&filename);
-            let content_len = body.len();
-            let now = format_http_date(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs() as i64,
-            );
+            let http_ref = &server.conns[slab_key].http;
 
-            let mut builder = ResponseBuilder::new()
-                .status(200, "OK")
-                .header("Content-Type", content_type)
-                .header("Content-Length", &content_len.to_string())
-                .header("Date", &now)
-                .header("Server", "thttpd-rs");
+            let is_range = http_ref.got_range;
+            let first_byte = http_ref.first_byte_index;
+            let last_byte = http_ref.last_byte_index;
 
-            if server.config.max_age >= 0 {
-                builder = builder.header("Cache-Control", &format!("max-age={}", server.config.max_age));
-            }
+            let body = if is_range {
+                let start = first_byte as usize;
+                let end = (last_byte as usize) + 1;
+                let data = &mmap[..];
+                if start < data.len() && end <= data.len() {
+                    data[start..end].to_vec()
+                } else {
+                    data.to_vec()
+                }
+            } else {
+                mmap.to_vec()
+            };
 
-            if let Some(ref p3p) = server.config.p3p {
-                builder = builder.header("P3P", p3p);
-            }
-
-            let response = builder.body(body).build();
-
+            let response = build_full_response(http_ref, 200, "OK", content_type, file_size, file_mtime, &[]);
             let slot = &mut server.conns[slab_key];
+            let full_response = if slot.http.mime_flag { let mut r = response; r.extend_from_slice(&body); r } else { body };
             slot.http.file_address = Some(mmap);
-            slot.http.response = response;
+            slot.http.response = full_response;
             slot.http.response_len = slot.http.response.len();
             slot.http.bytes_sent = 0;
-            slot.http.status_code = 200;
+            slot.http.status_code = if is_range { 206 } else { 200 };
             transition_to_sending(server, slab_key);
         }
         Err(_) => {
-            let response = build_error_response(404, "Not Found", None);
+            let url = server.conns[slab_key].http.encoded_url.clone();
+            let body = error_page(404, "Not Found", "The requested URL '%.80s' was not found on this server.\n", &url);
+            let http_ref = &server.conns[slab_key].http;
+            let response = build_full_response(http_ref, 404, "Not Found", "text/html", -1, 0, &[]);
+            let full_response = if http_ref.mime_flag { let mut r = response; r.extend_from_slice(&body); r } else { body };
             let slot = &mut server.conns[slab_key];
-            slot.http.response = response;
+            slot.http.response = full_response;
             slot.http.response_len = slot.http.response.len();
             transition_to_sending(server, slab_key);
         }
@@ -412,7 +732,7 @@ fn serve_static(server: &mut Server, slab_key: usize, file_path: &Path) {
 }
 
 /// Dispatch a CGI request.
-fn dispatch_cgi(server: &mut Server, slab_key: usize, script_path: &Path) {
+fn dispatch_cgi(server: &mut Server, slab_key: usize, _script_path: &Path) {
     let (method, orig_filename, query, host, peer_addr, content_type, content_length,
          user_agent, referer, accept, accept_encoding, cookie, path_info) = {
         let slot = &server.conns[slab_key];
@@ -433,46 +753,104 @@ fn dispatch_cgi(server: &mut Server, slab_key: usize, script_path: &Path) {
         )
     };
 
-    let mut http_headers = std::collections::HashMap::new();
-    if !host.is_empty() {
-        http_headers.insert("Host".to_string(), host);
-    }
-    if !user_agent.is_empty() {
-        http_headers.insert("User-Agent".to_string(), user_agent);
-    }
-    if !referer.is_empty() {
-        http_headers.insert("Referer".to_string(), referer);
-    }
-    if !accept.is_empty() {
-        http_headers.insert("Accept".to_string(), accept);
-    }
-    if !accept_encoding.is_empty() {
-        http_headers.insert("Accept-Encoding".to_string(), accept_encoding);
-    }
-    if !cookie.is_empty() {
-        http_headers.insert("Cookie".to_string(), cookie);
+    // --- PATH_INFO extraction ---
+    let (resolved_script, final_path_info) = if path_info.is_empty() {
+        let mut test_path = orig_filename.clone();
+        let mut extracted_pathinfo = String::new();
+
+        loop {
+            let full_path = server.config.dir.join(&test_path[1..]);
+            if full_path.exists() {
+                break (test_path, extracted_pathinfo);
+            }
+            if let Some(last_slash) = test_path.rfind('/') {
+                if last_slash == 0 {
+                    break (orig_filename.clone(), String::new());
+                }
+                let stripped = &test_path[last_slash + 1..];
+                if extracted_pathinfo.is_empty() {
+                    extracted_pathinfo = format!("/{}", stripped);
+                } else {
+                    extracted_pathinfo = format!("/{}{}", stripped, extracted_pathinfo);
+                }
+                test_path = test_path[..last_slash].to_string();
+            } else {
+                break (orig_filename.clone(), String::new());
+            }
+        }
+    } else {
+        (orig_filename.clone(), path_info)
+    };
+
+    // Update path_info in HttpConn
+    {
+        let slot = &mut server.conns[slab_key];
+        slot.http.path_info = final_path_info.clone();
     }
 
+    let resolved_path = server.config.dir.join(&resolved_script[1..]);
+
+    // --- CGI not-found check ---
+    if !resolved_path.exists() || resolved_path.is_dir() {
+        let url = server.conns[slab_key].http.encoded_url.clone();
+        let body = error_page(404, "Not Found", "The requested URL '%.80s' was not found on this server.\n", &url);
+        let http_ref = &server.conns[slab_key].http;
+        let response = build_full_response(http_ref, 404, "Not Found", "text/html", -1, 0, &[]);
+        let full_response = if http_ref.mime_flag { let mut r = response; r.extend_from_slice(&body); r } else { body };
+        let slot = &mut server.conns[slab_key];
+        slot.http.response = full_response;
+        slot.http.response_len = slot.http.response.len();
+        transition_to_sending(server, slab_key);
+        return;
+    }
+
+    // Build HTTP headers map
+    let mut http_headers = std::collections::HashMap::new();
+    if !host.is_empty() { http_headers.insert("Host".to_string(), host.rsplit_once(':').map(|(ip, _)| ip).unwrap_or(&host).to_string()); }
+    if !user_agent.is_empty() { http_headers.insert("User-Agent".to_string(), user_agent); }
+    if !referer.is_empty() { http_headers.insert("Referer".to_string(), referer); }
+    if !accept.is_empty() { http_headers.insert("Accept".to_string(), accept); }
+    if !accept_encoding.is_empty() { http_headers.insert("Accept-Encoding".to_string(), accept_encoding); }
+    if !cookie.is_empty() { http_headers.insert("Cookie".to_string(), cookie); }
+
+    // Strip port from remote_addr — but HTTP_HOST should also not include port
+    let remote_addr_clean = peer_addr.rsplit_once(':').map(|(ip, _)| ip).unwrap_or(&peer_addr).to_string();
+    let _host_clean = host.rsplit_once(':').map(|(ip, _)| ip).unwrap_or(&host).to_string();
+
+    // Get hostname via gethostname()
+    let server_name = hostname::get()
+        .ok()
+        .and_then(|h| h.into_string().ok())
+        .unwrap_or_else(|| "localhost".to_string());
+
+    let path_translated = if final_path_info.is_empty() {
+        None
+    } else {
+        Some(server.config.dir.join(&final_path_info[1..]).to_string_lossy().to_string())
+    };
+
+    let cgi_pattern_str = server.config.cgi_pattern.as_deref().unwrap_or("");
+
     let ctx = thttpd_http::cgi::CgiContext {
-        server_software: "thttpd-rs/0.1".to_string(),
-        server_name: server.config.hostname.clone().unwrap_or_else(|| "localhost".to_string()),
+        server_software: "sthttpd/2.27.0 03oct2014".to_string(),
+        server_name,
         gateway_interface: "CGI/1.1".to_string(),
         server_protocol: "HTTP/1.0".to_string(),
         server_port: server.config.port,
         request_method: method,
-        script_name: orig_filename.clone(),
+        script_name: resolved_script.clone(),
         query_string: query,
-        remote_addr: peer_addr,
+        remote_addr: remote_addr_clean,
         content_type: if content_type.is_empty() { None } else { Some(content_type) },
         content_length,
         http_headers,
-        path_info: if path_info.is_empty() { None } else { Some(path_info) },
-        path_translated: None,
+        path_info: if final_path_info.is_empty() { None } else { Some(final_path_info) },
+        path_translated,
         remote_user: None,
         auth_type: None,
     };
 
-    let env = thttpd_http::cgi::build_envp(&ctx, &orig_filename);
+    let env = thttpd_http::cgi::build_envp(&ctx, &resolved_script, cgi_pattern_str);
 
     // Read POST body if present
     let post_body = server.conns.get(slab_key).and_then(|slot| {
@@ -486,32 +864,31 @@ fn dispatch_cgi(server: &mut Server, slab_key: usize, script_path: &Path) {
         })
     });
 
-    match thttpd_http::cgi::execute_cgi(script_path, env, post_body.as_deref()) {
+    match thttpd_http::cgi::execute_cgi(&resolved_path, env, post_body.as_deref()) {
         Ok(mut cgi_result) => {
             let mut output = Vec::new();
             if let Some(stdout) = cgi_result.child.stdout.take() {
                 let mut stdout = stdout;
                 let _ = stdout.read_to_end(&mut output);
             }
-            let _ = cgi_result.child.wait();
+            // If stdout is empty, try reading stderr (for error scripts that write to stderr)
+            if output.is_empty() {
+                if let Some(stderr) = cgi_result.child.stderr.take() {
+                    let mut stderr = stderr;
+                    let _ = stderr.read_to_end(&mut output);
+                }
+            }
+            let _exit_status = cgi_result.child.wait();
 
             let response = if cgi_result.is_nph {
                 output
             } else {
-                let (headers, body) = parse_cgi_output(&output);
-                let mut builder = ResponseBuilder::new().status(200, "OK");
-                for (name, value) in headers {
-                    if name.eq_ignore_ascii_case("status") {
-                        if let Some(space_pos) = value.find(' ') {
-                            if let Ok(code) = value[..space_pos].parse::<u16>() {
-                                builder = builder.status(code, &value[space_pos + 1..]);
-                            }
-                        }
-                    } else {
-                        builder = builder.header(&name, &value);
-                    }
-                }
-                builder.body(body).build()
+                // Raw passthrough: build status line + append raw CGI output bytes
+                let (status_code, status_text) = extract_cgi_status(&output);
+                let mut resp = Vec::new();
+                resp.extend_from_slice(format!("HTTP/1.0 {} {}\r\n", status_code, status_text).as_bytes());
+                resp.extend_from_slice(&output);
+                resp
             };
 
             let slot = &mut server.conns[slab_key];
@@ -521,47 +898,50 @@ fn dispatch_cgi(server: &mut Server, slab_key: usize, script_path: &Path) {
         }
         Err(e) => {
             eprintln!("thttpd: CGI error: {e}");
-            let response = build_error_response(500, "Internal Server Error", None);
+            let url = server.conns[slab_key].http.encoded_url.clone();
+            let body = error_page(500, "Internal Error", "There was an unusual problem serving the requested URL '%.80s'.\n", &url);
+            let http_ref = &server.conns[slab_key].http;
+            let response = build_full_response(http_ref, 500, "Internal Error", "text/html", -1, 0, &[]);
+            let full_response = if http_ref.mime_flag { let mut r = response; r.extend_from_slice(&body); r } else { body };
             let slot = &mut server.conns[slab_key];
-            slot.http.response = response;
+            slot.http.response = full_response;
             slot.http.response_len = slot.http.response.len();
             transition_to_sending(server, slab_key);
         }
     }
 }
 
-/// Parse CGI output into headers and body.
-fn parse_cgi_output(output: &[u8]) -> (Vec<(String, String)>, Vec<u8>) {
+/// Extract status code and text from CGI output headers.
+fn extract_cgi_status(output: &[u8]) -> (u16, String) {
     let blank_pos = output.windows(4)
         .position(|w| w == b"\r\n\r\n")
         .or_else(|| output.windows(2).position(|w| w == b"\n\n"));
 
-    match blank_pos {
-        Some(pos) => {
-            let separator_len = if output.get(pos..pos + 4) == Some(b"\r\n\r\n") { 4 } else { 2 };
-            let header_bytes = &output[..pos];
-            let body = output[pos + separator_len..].to_vec();
-            let headers = parse_cgi_headers(header_bytes);
-            (headers, body)
-        }
-        None => (Vec::new(), output.to_vec()),
-    }
-}
+    let header_end = match blank_pos {
+        Some(pos) => pos,
+        None => return (200, "OK".to_string()),
+    };
 
-/// Parse CGI header section into name/value pairs.
-fn parse_cgi_headers(header_bytes: &[u8]) -> Vec<(String, String)> {
+    let header_bytes = &output[..header_end];
     let header_str = String::from_utf8_lossy(header_bytes);
-    let mut headers = Vec::new();
+
     for line in header_str.lines() {
         if let Some(colon_pos) = line.find(':') {
-            let name = line[..colon_pos].trim().to_string();
-            let value = line[colon_pos + 1..].trim().to_string();
-            if !name.is_empty() {
-                headers.push((name, value));
+            let name = &line[..colon_pos];
+            if name.trim().eq_ignore_ascii_case("status") {
+                let value = line[colon_pos + 1..].trim();
+                if let Some(space_pos) = value.find(' ') {
+                    if let Ok(code) = value[..space_pos].parse::<u16>() {
+                        return (code, value[space_pos + 1..].to_string());
+                    }
+                } else if let Ok(code) = value.parse::<u16>() {
+                    return (code, String::new());
+                }
             }
         }
     }
-    headers
+
+    (200, "OK".to_string())
 }
 
 /// Send response bytes to the connection.
@@ -712,8 +1092,11 @@ fn close_connection(server: &mut Server, slab_key: usize) {
 }
 
 /// Build a complete HTTP error response.
-fn build_error_response(status_code: u16, status_text: &str, extra: Option<&str>) -> Vec<u8> {
-    let body = error_page(status_text, extra);
+fn build_error_response(status_code: u16, status_text: &str, extra: &str) -> Vec<u8> {
+    // For 400 errors, extra is used as arg (empty string)
+    // The form is the generic bad-request message
+    let form = "Your request has bad syntax or is inherently impossible to satisfy.\n";
+    let body = error_page(status_code, status_text, form, extra);
     ResponseBuilder::new()
         .status(status_code, status_text)
         .header("Content-Type", "text/html")

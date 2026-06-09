@@ -36,6 +36,11 @@ pub fn percent_decode(input: &str) -> String {
 /// Normalize a URL path: resolve `.` and `..` components, reject traversal above root.
 /// Returns None if the path attempts to escape root.
 pub fn normalize_path(path: &str) -> Option<String> {
+    // Reject paths containing double-slash (//) — matches C behavior
+    if path.contains("//") {
+        return None;
+    }
+
     let mut components: Vec<&str> = Vec::new();
 
     for part in path.split('/') {
@@ -93,5 +98,11 @@ mod tests {
     #[test]
     fn test_normalize_traversal() {
         assert_eq!(normalize_path("/../../etc/passwd"), None);
+    }
+
+    #[test]
+    fn test_normalize_double_slash() {
+        assert_eq!(normalize_path("//test.txt"), None);
+        assert_eq!(normalize_path("/foo//bar"), None);
     }
 }

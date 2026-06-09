@@ -97,7 +97,7 @@ def main():
             req = entry["request"]
             expected = entry["response"]
 
-            # Rebuild kwargs for http_request
+            # Build kwargs for http_request
             kwargs = {}
             if "raw_request" in req:
                 kwargs["raw_request"] = req["raw_request"].encode("latin-1")
@@ -108,11 +108,14 @@ def main():
                 # Reconstruct headers dict from request
                 hdrs = {}
                 for k, v in req.items():
-                    if k in ("method", "path", "http_version", "body", "raw_request"):
+                    if k in ("method", "path", "http_version", "body", "raw_request", "headers"):
                         continue
-                    # The request dict may have stored headers with lowercase names
-                    # We need to pass them through
+                    # Individual header entries at top level
                     hdrs[k] = v
+                # Handle nested headers dict (from golden capture)
+                if "headers" in req and isinstance(req["headers"], dict):
+                    for k, v in req["headers"].items():
+                        hdrs[k] = v
                 # Override with explicit Host if not present
                 if "Host" not in hdrs and "host" not in hdrs:
                     hdrs["Host"] = f"{args.host}:{port}"

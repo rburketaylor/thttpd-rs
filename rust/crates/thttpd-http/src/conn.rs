@@ -52,6 +52,15 @@ pub struct HttpConn {
     pub accept_encoding: String,
     pub if_modified_since: Option<i64>,
 
+    // HTTP/0.9 mode
+    pub mime_flag: bool,
+
+    // Range request
+    pub got_range: bool,
+    pub first_byte_index: i64,
+    pub last_byte_index: i64,
+    pub range_if: Option<i64>,
+
     // Response
     pub response: Vec<u8>,
     pub response_len: usize,
@@ -101,6 +110,12 @@ impl HttpConn {
             accept_encoding: String::new(),
             if_modified_since: None,
 
+            mime_flag: true,
+            got_range: false,
+            first_byte_index: 0,
+            last_byte_index: -1,
+            range_if: None,
+
             response: Vec::new(),
             response_len: 0,
             status_code: 0,
@@ -140,6 +155,11 @@ impl HttpConn {
         self.accept.clear();
         self.accept_encoding.clear();
         self.if_modified_since = None;
+        self.mime_flag = true;
+        self.got_range = false;
+        self.first_byte_index = 0;
+        self.last_byte_index = -1;
+        self.range_if = None;
         self.response.clear();
         self.response_len = 0;
         self.status_code = 0;

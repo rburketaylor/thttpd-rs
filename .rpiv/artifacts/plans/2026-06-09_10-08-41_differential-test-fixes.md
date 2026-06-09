@@ -413,12 +413,12 @@ mod tests {
 ### Success Criteria:
 
 #### Automated Verification:
-- [ ] Type checking passes: `cargo check`
-- [ ] Tests pass: `cargo test`
-- [ ] `build_full_response()` produces 7 headers in C order for 200 OK
-- [ ] `build_full_response()` adds `Cache-Control: no-cache,no-store` for 404
-- [ ] `error_page()` output includes `{status} {title}` in TITLE/H2 tags
-- [ ] `error_page()` output ends with `<HR>\n<ADDRESS>` footer
+- [x] Type checking passes: `cargo check`
+- [x] Tests pass: `cargo test`
+- [x] `build_full_response()` produces 7 headers in C order for 200 OK
+- [x] `build_full_response()` adds `Cache-Control: no-cache,no-store` for 404
+- [x] `error_page()` output includes `{status} {title}` in TITLE/H2 tags
+- [x] `error_page()` output ends with `<HR>\n<ADDRESS>` footer
 
 #### Manual Verification:
 - [ ] Error page HTML structure matches C format
@@ -684,17 +684,17 @@ fn process_request(server: &mut Server, slab_key: usize) {
 ### Success Criteria:
 
 #### Automated Verification:
-- [ ] Type checking passes: `cargo check`
-- [ ] Tests pass: `cargo test`
-- [ ] `normalize_path("//test.txt")` returns `None`
-- [ ] URL exceeding length limit returns 500
-- [ ] `If-Modified-Since` header parsed into `http.if_modified_since`
-- [ ] `Range: bytes=N-M` header parsed into `got_range`, `first_byte_index`, `last_byte_index`
-- [ ] HTTP/0.9 request sets `mime_flag = false`
-- [ ] Unknown method (e.g. FOOBAR) triggers 501 response
-- [ ] `malformed.invalid_version` test passes (non-HTTP/1.x version handled without crash)
-- [ ] `malformed.very_long_header` test passes (long header does not panic or hang)
-- [ ] `malformed.negative_content_length` test passes (negative Content-Length parsed without underflow)
+- [x] Type checking passes: `cargo check`
+- [x] Tests pass: `cargo test`
+- [x] `normalize_path("//test.txt")` returns `None`
+- [x] URL exceeding length limit returns 500
+- [x] `If-Modified-Since` header parsed into `http.if_modified_since`
+- [x] `Range: bytes=N-M` header parsed into `got_range`, `first_byte_index`, `last_byte_index`
+- [x] HTTP/0.9 request sets `mime_flag = false`
+- [x] Unknown method (e.g. FOOBAR) triggers 501 response
+- [x] `malformed.invalid_version` test passes (non-HTTP/1.x version handled without crash)
+- [x] `malformed.very_long_header` test passes (long header does not panic or hang)
+- [x] `malformed.negative_content_length` test passes (negative Content-Length parsed without underflow)
 
 #### Manual Verification:
 - [ ] Request parsing extracts all required headers from read buffer
@@ -931,14 +931,14 @@ fn serve_static(server: &mut Server, slab_key: usize, file_path: &Path) {
 ### Success Criteria:
 
 #### Automated Verification:
-- [ ] Type checking passes: `cargo check`
-- [ ] Tests pass: `cargo test`
-- [ ] HEAD request returns `Content-Length` header but body_length = 0
-- [ ] IMS with future date returns 304 with no `Content-Length`
-- [ ] Range request returns 206 with `Content-Range` header
-- [ ] Symlink escape returns 403
-- [ ] Permission-denied file returns 403
-- [ ] Non-existent file returns 404
+- [x] Type checking passes: `cargo check`
+- [x] Tests pass: `cargo test`
+- [x] HEAD request returns `Content-Length` header but body_length = 0
+- [x] IMS with future date returns 304 with no `Content-Length`
+- [x] Range request returns 206 with `Content-Range` header
+- [x] Symlink escape returns 403
+- [x] Permission-denied file returns 403
+- [x] Non-existent file returns 404
 
 #### Manual Verification:
 - [ ] File mtime correctly used for `Last-Modified` header
@@ -1231,15 +1231,15 @@ fn extract_cgi_status(output: &[u8]) -> (u16, String) {
 ### Success Criteria:
 
 #### Automated Verification:
-- [ ] Type checking passes: `cargo check`
-- [ ] Tests pass: `cargo test`
-- [ ] CGI output produces raw passthrough bytes (status line + verbatim output)
-- [ ] `build_envp()` first entry is `PATH`
-- [ ] `QUERY_STRING` omitted when empty
-- [ ] `REMOTE_ADDR` has port stripped
-- [ ] `CGI_PATTERN` env var present
-- [ ] PATH_INFO extracted for `/cgi-bin/script.sh/extra/path`
-- [ ] Non-existent CGI script returns 404
+- [x] Type checking passes: `cargo check`
+- [x] Tests pass: `cargo test`
+- [x] CGI output produces raw passthrough bytes (status line + verbatim output)
+- [x] `build_envp()` first entry is `PATH`
+- [x] `QUERY_STRING` omitted when empty
+- [x] `REMOTE_ADDR` has port stripped
+- [x] `CGI_PATTERN` env var present
+- [x] PATH_INFO extracted for `/cgi-bin/script.sh/extra/path`
+- [x] Non-existent CGI script returns 404
 
 #### Manual Verification:
 - [ ] CGI env order matches C's `make_envp()` order

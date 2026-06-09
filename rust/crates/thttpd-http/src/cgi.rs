@@ -44,13 +44,14 @@ pub fn is_nph_script(script_path: &str) -> bool {
 
 /// Build the CGI environment variables in the exact order C's `make_envp()` uses.
 /// Order matters for legacy CGI scripts.
-pub fn build_envp(ctx: &CgiContext, script_path: &str) -> Vec<(String, String)> {
+pub fn build_envp(ctx: &CgiContext, script_path: &str, cgi_pattern: &str) -> Vec<(String, String)> {
     let mut env = Vec::new();
 
     // Order must match C's make_envp() at libhttpd.c:3002-3081
-    env.push(("GATEWAY_INTERFACE".to_string(), "CGI/1.1".to_string()));
+    env.push(("PATH".to_string(), "/usr/local/bin:/usr/ucb:/bin:/usr/bin".to_string()));
     env.push(("SERVER_SOFTWARE".to_string(), ctx.server_software.clone()));
     env.push(("SERVER_NAME".to_string(), ctx.server_name.clone()));
+    env.push(("GATEWAY_INTERFACE".to_string(), ctx.gateway_interface.clone()));
     env.push(("SERVER_PROTOCOL".to_string(), ctx.server_protocol.clone()));
     env.push(("SERVER_PORT".to_string(), ctx.server_port.to_string()));
     env.push(("REQUEST_METHOD".to_string(), ctx.request_method.clone()));
@@ -62,7 +63,12 @@ pub fn build_envp(ctx: &CgiContext, script_path: &str) -> Vec<(String, String)> 
         env.push(("PATH_TRANSLATED".to_string(), path_translated.clone()));
     }
     env.push(("SCRIPT_NAME".to_string(), script_path.to_string()));
-    env.push(("QUERY_STRING".to_string(), ctx.query_string.clone()));
+
+    // QUERY_STRING only when non-empty
+    if !ctx.query_string.is_empty() {
+        env.push(("QUERY_STRING".to_string(), ctx.query_string.clone()));
+    }
+
     env.push(("REMOTE_ADDR".to_string(), ctx.remote_addr.clone()));
 
     if let Some(ref auth_type) = ctx.auth_type {
@@ -72,6 +78,15 @@ pub fn build_envp(ctx: &CgiContext, script_path: &str) -> Vec<(String, String)> 
         env.push(("REMOTE_USER".to_string(), remote_user.clone()));
     }
 
+    // HTTP_* headers in C's fixed order
+    let fixed_order = ["Referer", "User-Agent", "Accept", "Accept-Encoding", "Cookie", "Host"];
+    for header in &fixed_order {
+        if let Some(value) = ctx.http_headers.get(*header) {
+            let env_key = format!("HTTP_{}", header.to_uppercase().replace('-', "_"));
+            env.push((env_key, value.clone()));
+        }
+    }
+
     if let Some(ref content_type) = ctx.content_type {
         env.push(("CONTENT_TYPE".to_string(), content_type.clone()));
     }
@@ -79,15 +94,8 @@ pub fn build_envp(ctx: &CgiContext, script_path: &str) -> Vec<(String, String)> 
         env.push(("CONTENT_LENGTH".to_string(), content_length.to_string()));
     }
 
-    // HTTP_* headers in sorted order
-    let mut http_headers: Vec<_> = ctx.http_headers.iter().collect();
-    http_headers.sort_by_key(|(k, _)| k.clone());
-    for (key, value) in http_headers {
-        let env_key = format!("HTTP_{}", key.to_uppercase().replace('-', "_"));
-        env.push((env_key, value.clone()));
-    }
-
-    env.push(("PATH".to_string(), "/usr/local/bin:/usr/ucb:/bin:/usr/bin".to_string()));
+    // CGI_PATTERN always present
+    env.push(("CGI_PATTERN".to_string(), cgi_pattern.to_string()));
 
     env
 }
@@ -103,7 +111,7 @@ pub fn execute_cgi(
     let mut cmd = Command::new(script_path);
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped()) // capture stderr for error reporting
         .env_clear();
 
     for (key, value) in env {
@@ -152,9 +160,9 @@ mod tests {
             remote_user: None,
             auth_type: None,
         };
-        let env = build_envp(&ctx, "/test.cgi");
-        // GATEWAY_INTERFACE must come first (matching C's order)
-        assert_eq!(env[0].0, "GATEWAY_INTERFACE");
-        assert_eq!(env[0].1, "CGI/1.1");
+        let env = build_envp(&ctx, "/test.cgi", "**.cgi");
+        // PATH must come first (matching C's order)
+        assert_eq!(env[0].0, "PATH");
+        assert_eq!(env[0].1, "/usr/local/bin:/usr/ucb:/bin:/usr/bin");
     }
 }
