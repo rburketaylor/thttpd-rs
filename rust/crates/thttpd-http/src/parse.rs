@@ -6,9 +6,11 @@ use crate::parse_state::{GotRequest, ParseState};
 
 /// Run the request-detection FSM over new data in `read_buf`.
 /// `checked_idx` is where we left off; `read_idx` is end of valid data.
+/// `initial_state` is the parser state from the previous call (persists
+/// across incremental reads, matching C's `hc->checked_state`).
 /// Returns (result, new_checked_idx, final_state).
-pub fn got_request(read_buf: &[u8], mut checked_idx: usize, read_idx: usize) -> (GotRequest, usize, ParseState) {
-    let mut state = ParseState::FirstWord;
+pub fn got_request(read_buf: &[u8], mut checked_idx: usize, read_idx: usize, initial_state: ParseState) -> (GotRequest, usize, ParseState) {
+    let mut state = initial_state;
 
     while checked_idx < read_idx {
         let c = read_buf[checked_idx];
@@ -102,40 +104,58 @@ mod tests {
     #[test]
     fn test_simple_get() {
         let buf = b"GET / HTTP/1.0\r\n\r\n";
-        let (result, _, _) = got_request(buf, 0, buf.len());
+        let (result, _, _) = got_request(buf, 0, buf.len(), ParseState::FirstWord);
         assert_eq!(result, GotRequest::GotRequest);
     }
 
     #[test]
     fn test_incomplete_request() {
         let buf = b"GET / HTTP/1.0\r\n";
-        let (result, _, _) = got_request(buf, 0, buf.len());
+        let (result, _, _) = got_request(buf, 0, buf.len(), ParseState::FirstWord);
         assert_eq!(result, GotRequest::NoRequest);
     }
 
     #[test]
     fn test_http09_two_word() {
         let buf = b"GET /\r\n";
-        let (result, _, _) = got_request(buf, 0, buf.len());
+        let (result, _, _) = got_request(buf, 0, buf.len(), ParseState::FirstWord);
         assert_eq!(result, GotRequest::GotRequest);
     }
 
     #[test]
     fn test_bad_request() {
         let buf = b"GET / HTTP/1.0\r\n\rX";
-        let (result, _, _) = got_request(buf, 0, buf.len());
+        let (result, _, _) = got_request(buf, 0, buf.len(), ParseState::FirstWord);
         // After CRLF+CR, non-LF goes to Line state — not Bogus.
         // A truly bad request is one with CR/LF in FirstWord.
         let buf2 = b"\rGET / HTTP/1.0\r\n\r\n";
-        let (result2, _, _) = got_request(buf2, 0, buf2.len());
+        let (result2, _, _) = got_request(buf2, 0, buf2.len(), ParseState::FirstWord);
         assert_eq!(result2, GotRequest::BadRequest);
     }
 
     #[test]
     fn test_headers_with_body() {
         let buf = b"GET / HTTP/1.0\r\nHost: localhost\r\n\r\n";
-        let (result, _, _) = got_request(buf, 0, buf.len());
+        let (result, _, _) = got_request(buf, 0, buf.len(), ParseState::FirstWord);
         assert_eq!(result, GotRequest::GotRequest);
+    }
+
+    #[test]
+    fn test_incremental_byte_by_byte() {
+        // Simulate data arriving one byte at a time — the core incremental FSM case
+        let buf = b"GET / HTTP/1.0\r\n\r\n";
+        let mut checked_idx = 0;
+        let mut state = ParseState::FirstWord;
+        for i in 0..buf.len() {
+            let (result, new_checked, new_state) = got_request(buf, checked_idx, i + 1, state.clone());
+            checked_idx = new_checked;
+            state = new_state;
+            if i < buf.len() - 1 {
+                assert_eq!(result, GotRequest::NoRequest, "should not complete at byte {}", i);
+            } else {
+                assert_eq!(result, GotRequest::GotRequest, "should complete at last byte");
+            }
+        }
     }
 
     #[test]

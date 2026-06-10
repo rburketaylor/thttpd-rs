@@ -120,11 +120,15 @@ pub fn execute_cgi(
 
     let mut child = cmd.spawn()?;
 
-    // Write POST body to stdin if present
-    if let Some(body) = post_body {
-        if let Some(mut stdin) = child.stdin.take() {
+    // Write POST body to stdin if present, then close stdin.
+    // MUST close stdin even when there is no body — otherwise the CGI child
+    // (e.g. `cat`) blocks reading from stdin while we block reading its stdout,
+    // producing a deadlock.
+    if let Some(mut stdin) = child.stdin.take() {
+        if let Some(body) = post_body {
             let _ = stdin.write_all(body);
         }
+        // stdin is dropped here, closing the pipe and sending EOF to the child.
     }
 
     Ok(CgiResult { child, is_nph })

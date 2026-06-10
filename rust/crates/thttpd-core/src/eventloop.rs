@@ -217,7 +217,7 @@ fn handle_read(server: &mut Server, slab_key: usize) -> io::Result<()> {
     // Run the request-detection FSM
     let (result, new_checked, new_state) = {
         let http = &server.conns[slab_key].http;
-        got_request(&http.read_buf, http.checked_idx, http.read_idx)
+        got_request(&http.read_buf, http.checked_idx, http.read_idx, http.parse_state.clone())
     };
 
     {
@@ -382,9 +382,10 @@ fn process_request(server: &mut Server, slab_key: usize) {
             slot.http.content_type = ct;
         }
 
-        // Content-Length
+        // Content-Length — reject negative values (C thttpd uses atol() which
+        // returns -1 for "-1", and its default/contentlength == -1 means "none").
         if let Some(cl_str) = extract_header(headers_bytes, "Content-Length") {
-            slot.http.content_length = cl_str.trim().parse::<i64>().ok();
+            slot.http.content_length = cl_str.trim().parse::<i64>().ok().filter(|&v| v >= 0);
         }
 
         // User-Agent
