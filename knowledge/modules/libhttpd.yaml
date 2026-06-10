@@ -1,4 +1,5 @@
 name: libhttpd
 source: legacy/src/libhttpd.c
-status: pending
-dependencies: []
+rust_crate: thttpd-http
+status: migrated
+dependencies: [match, mmc, tdate_parse]

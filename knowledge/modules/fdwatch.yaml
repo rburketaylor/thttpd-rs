@@ -1,4 +1,5 @@
 name: fdwatch
 source: legacy/src/fdwatch.c
-status: pending
+rust_crate: thttpd-fdwatch
+status: migrated
 dependencies: []

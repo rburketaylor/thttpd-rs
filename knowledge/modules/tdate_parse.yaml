@@ -1,4 +1,5 @@
 name: tdate_parse
 source: legacy/src/tdate_parse.c
-status: pending
+rust_crate: thttpd-tdate
+status: migrated
 dependencies: []

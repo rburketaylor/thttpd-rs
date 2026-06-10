@@ -1,29 +1,36 @@
 modules:
   - name: match
     source: legacy/src/match.c
-    status: pending
+    rust_crate: thttpd-match
+    status: migrated
     dependencies: []
   - name: libhttpd
     source: legacy/src/libhttpd.c
-    status: pending
+    rust_crate: thttpd-http
+    status: migrated
     dependencies: [match, mmc, tdate_parse]
   - name: thttpd
     source: legacy/src/thttpd.c
-    status: pending
+    rust_crate: thttpd-core
+    status: migrated
     dependencies: [libhttpd, fdwatch, timers, mmc]
   - name: fdwatch
     source: legacy/src/fdwatch.c
-    status: pending
+    rust_crate: thttpd-fdwatch
+    status: migrated
     dependencies: []
   - name: timers
     source: legacy/src/timers.c
-    status: pending
+    rust_crate: thttpd-timers
+    status: migrated
     dependencies: []
   - name: mmc
     source: legacy/src/mmc.c
-    status: pending
+    rust_crate: thttpd-mmc
+    status: migrated
     dependencies: []
   - name: tdate_parse
     source: legacy/src/tdate_parse.c
-    status: pending
+    rust_crate: thttpd-tdate
+    status: migrated
     dependencies: []

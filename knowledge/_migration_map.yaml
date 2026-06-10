@@ -5,39 +5,54 @@ migrations:
   - c_module: match.c
     rust_crate: thttpd-match
     status: verified
-    notes: "Direct translation. Pattern syntax preserved. Differential tests pass."
+    parity: "100%"
+    notes: "Direct translation. Shell-style glob matching preserved. 80/80 differential tests pass."
 
   - c_module: mime_types.h
     rust_crate: thttpd-mime
     status: verified
-    notes: "Static tables converted to match statements. Differential tests pass."
+    parity: "100%"
+    notes: "Static tables converted to match statements. 80/80 differential tests pass."
 
   - c_module: tdate_parse.c
     rust_crate: thttpd-tdate
     status: verified
-    notes: "Date parsing with epoch calculation. Differential tests pass."
+    parity: "100%"
+    notes: "HTTP date parsing with epoch calculation. 80/80 differential tests pass."
 
   - c_module: fdwatch.c
     rust_crate: thttpd-fdwatch
     status: verified
-    notes: "Thin mio wrapper. Token constants for dispatch. Differential tests pass."
+    parity: "100%"
+    notes: "Thin mio wrapper replacing select()/poll(). Token constants for dispatch. 80/80 differential tests pass."
 
   - c_module: timers.c
     rust_crate: thttpd-timers
     status: verified
-    notes: "BinaryHeap replaces hash-of-sorted-lists. Differential tests pass."
+    parity: "100%"
+    notes: "BinaryHeap replaces hash-of-sorted-lists. Lazy cancellation. 80/80 differential tests pass."
 
   - c_module: mmc.c
     rust_crate: thttpd-mmc
     status: verified
-    notes: "Rc<Mmap> for reference counting. HashMap for cache. Differential tests pass."
+    parity: "100%"
+    notes: "Rc<Mmap> for reference counting. HashMap for cache. 80/80 differential tests pass."
 
   - c_module: libhttpd.c
     rust_crate: thttpd-http
     status: verified
-    notes: "Split into parse, response, cgi, dirlist, conn modules. 71/71 differential tests pass (9 timeout-heavy tests deferred)."
+    parity: "100%"
+    notes: "Split into parse, response, cgi, dirlist, conn, method, url, error modules. 80/80 differential tests pass."
 
   - c_module: thttpd.c
     rust_crate: thttpd-core
     status: verified
-    notes: "Event loop, startup, signal handling, throttling. 71/71 differential tests pass."
+    parity: "100%"
+    notes: "Event loop, startup, signal handling, throttling, config. 80/80 differential tests pass."
+
+test_summary:
+  differential_tests: 80
+  harness_tests: 80
+  unit_tests: 56
+  total: 216
+  failing: 0

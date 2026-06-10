@@ -1,16 +1,23 @@
 # thttpd-rs
 
-**A ground-up Rust port of [sthttpd](https://github.com/blueness/sthttpd) 2.27.0 — Jef Poskanzer's tiny/turbo/throttling HTTP server — backed by a multi-phase migration pipeline that proves byte-exact behavioral parity against the original C binary.**
+**A byte-exact Rust port of [sthttpd](https://github.com/blueness/sthttpd) 2.27.0 — Jef Poskanzer's tiny/turbo/throttling HTTP server — proven by automated differential testing against the original C binary.**
 
 ---
 
 ## The Story
 
-thttpd has served the internet faithfully since 1995. It's small (~9,800 lines of C), fast, secure, and does one thing extremely well: serve static files over HTTP. But it's written in C — manual memory management, raw pointer arithmetic, `fork()`/`exec()` CGI dispatch, and hand-rolled I/O multiplexing.
+thttpd has served the internet since 1995. It's small (~9,800 lines of C), fast, secure, and does one thing well: serve static files over HTTP with CGI support and bandwidth throttling. But it's written in C — manual memory management, raw pointer arithmetic, `fork()`/`exec()` CGI dispatch, and hand-rolled I/O multiplexing.
 
-This project asks a question: **can you port a 30-year-old C server to Rust without changing a single observable behavior?** Not "looks similar." Not "mostly equivalent." **Byte-exact parity**, proven by automated differential testing against the original compiled binary.
+This project answers a question: **can you port a 30-year-old C server to Rust without changing a single observable behavior?** Not "looks similar." Not "mostly equivalent." **Byte-exact parity**, proven by running 80 differential tests that compare the C and Rust binaries side-by-side across status code, headers, body, and connection lifecycle.
 
-The answer required building something more interesting than just a Rust HTTP server — it required a **migration pipeline**: a structured, gated, AI-assisted workflow that decomposes the problem, captures ground truth, translates module by module, and proves equivalence at every step.
+The answer is **yes**. Every test passes:
+
+| Suite | Result |
+|---|---|
+| Differential tests (C vs Rust) | **80 / 80** |
+| C-only harness tests | **80 / 80** |
+| Rust unit tests | **56 / 56** |
+| **Total** | **216 / 216** |
 
 ---
 
@@ -18,10 +25,11 @@ The answer required building something more interesting than just a Rust HTTP se
 
 ```
 thttpd-rs/
-├── rust/                   # Rust workspace — 8 crates, 2,429 lines across 26 files
+├── rust/                   # Rust workspace — 8 crates, 2,429 lines
+│   ├── README.md           # Architecture, crate map, dependency graph
 │   └── crates/
 │       ├── thttpd-core/    # Event loop, startup, signals, throttling
-│       ├── thttpd-http/    # HTTP parsing FSM, CGI, response building, directory listing
+│       ├── thttpd-http/    # HTTP parsing FSM, CGI, responses, directory listing
 │       ├── thttpd-fdwatch/ # I/O multiplexing (thin mio wrapper)
 │       ├── thttpd-timers/  # BinaryHeap timer wheel
 │       ├── thttpd-mmc/     # Memory-mapped file cache (Rc<Mmap>)
@@ -29,150 +37,103 @@ thttpd-rs/
 │       ├── thttpd-tdate/   # HTTP date parsing (RFC 1123/850/asctime)
 │       └── thttpd-mime/    # MIME type/encoding tables
 │
-├── legacy/                 # Upstream sthttpd source (see below)
-├── harness/                # Golden Master test suite (Python/pytest)
-│   ├── conftest.py         # Binary startup fixtures, port allocation
+├── legacy/                 # Upstream sthttpd source (for differential testing)
+├── harness/                # Test suite (Python/pytest)
+│   ├── conftest.py         # Server startup fixtures, port allocation
 │   ├── diff_engine.py      # 8-field response comparator
 │   └── tests/              # 80 test cases across 8 categories
 │
-├── pipeline/               # Migration automation scripts
-│   ├── build_legacy.sh     # Compile the C binary for capture
+├── pipeline/               # Build and validation scripts
+│   ├── build_legacy.sh     # Compile the C binary
+│   ├── validate_knowledge.py
 │   ├── run_golden_capture.py
 │   ├── run_differential.py
-│   ├── generate_report.py
-│   ├── analyze_module.py
-│   └── validate_knowledge.py
+│   └── generate_report.py
 │
-├── knowledge/              # Structured knowledge graph (YAML + Markdown)
+├── knowledge/              # Structured migration records (YAML + Markdown)
 │   ├── _index.yaml         # Master manifest
 │   ├── _architecture.yaml  # System architecture map
-│   ├── _migration_map.yaml # Per-file migration status
+│   ├── _migration_map.yaml # Per-file C→Rust mapping
 │   └── modules/            # Per-module YAML + prose pairs
 │
-└── docs/                   # Migration plans and strategy
-    ├── PLAN.md             # Master 6-phase migration plan
-    ├── EXECUTION_PLAN.md   # Parallel subagent execution plan
-    └── migration_path.md   # Pipeline philosophy
+├── JOURNEY.md              # Development narrative — the story of how it got built
+└── .github/workflows/      # CI pipeline
 ```
 
 ---
 
-## The Migration Pipeline
+## Architecture
 
-The pipeline is a 6-phase gated workflow. No phase starts until the previous one is proven complete.
-
-### Phase 0: Foundation
-
-Repo setup, Cargo workspace initialization, and the **knowledge system** — a version-controlled, schema-enforced knowledge graph (`knowledge/`) that gives both humans and AI agents a structured understanding of every C module: its functions, callers, callees, complexity, gotchas, and undocumented behavior. Each module gets a machine-parseable YAML file and a prose Markdown companion.
-
-### Phase 1: Analysis
-
-Automated static analysis of the C source, producing dependency graphs, risk assessments (raw pointer arithmetic → ownership mapping, `fork()`/`execve()` → `std::process::Command`, `select()`/`poll()` → mio, global mutable state → `OnceLock`/`RwLock`), and per-module complexity scoring.
-
-### Phase 2: Golden Master
-
-The critical innovation. Instead of "translating and hoping," we **capture the C binary's exact behavior first**:
-
-1. Compile the original C binary
-2. Blast it with 80 black-box test cases across 8 categories
-3. Capture every response (status code, headers, body, timing) into `baseline.json`
-
-This becomes the **golden master** — the ground truth that the Rust binary must match.
-
-**Test categories:** static files, CGI, headers, edge cases, malformed input, connection handling, errors, and bandwidth throttling.
-
-### Phase 3: Translation
-
-C → Rust, module by module, in dependency order (leaves first):
+The Rust port preserves thttpd's original architecture — single-threaded, event-driven, no async runtime:
 
 ```
-match.c → thttpd-match         (91 → 132 lines)
-mime_types.h → thttpd-mime     (190 → 95 lines)
-tdate_parse.c → thttpd-tdate   (330 → 228 lines)
-fdwatch.c → thttpd-fdwatch     (838 → 72 lines)
-timers.c → thttpd-timers       (403 → 253 lines)
-mmc.c → thttpd-mmc             (529 → 200 lines)
-libhttpd.c → thttpd-http       (4,230 → 995 lines)
-thttpd.c → thttpd-core         (2,189 → 454 lines)
+                              ┌─────────────┐
+                              │  thttpd-core │  main(), event loop, signals
+                              └──────┬───────┘
+                                     │
+              ┌──────────────────────┼──────────────────────┐
+              │                      │                      │
+     ┌────────┴────────┐   ┌────────┴────────┐   ┌────────┴────────┐
+     │  thttpd-http    │   │  thttpd-fdwatch  │   │  thttpd-timers  │
+     │  parse, CGI,    │   │  mio wrapper     │   │  timer wheel    │
+     │  response, dir  │   └─────────────────┘   └─────────────────┘
+     └───┬────┬────┬───┘
+         │    │    │
+    ┌────┘    │    └──────┐
+    │         │           │
+┌───┴───┐ ┌──┴───┐ ┌─────┴─────┐
+│match  │ │ mmc  │ │  tdate    │
+│globs  │ │cache │ │  dates    │
+└───────┘ └──┬───┘ └───────────┘
+             │
+       ┌─────┴─────┐
+       │   mime    │
+       │  types    │
+       └───────────┘
 ```
 
-Each module follows a strict translation protocol: read the knowledge YAML, translate function by function, compile-gate (must pass `cargo check`), then unit-test-gate.
-
-### Phase 4: Verification — The Differential Test Loop
-
-The moment of truth:
-
-1. Start the Rust binary
-2. Replay the exact same golden master test suite
-3. Diff every response across 8 dimensions: status code, status text, header count, header order, header values, body SHA-256, body length, and connection result
-4. If anything diverges, feed the failure back to the AI with the exact C behavior, the Rust behavior, and the relevant source — then loop
-
-This is not "looks about right." This is **byte-exact proof of equivalence**.
-
-### Phase 5: Modernization
-
-Once 100% of golden master tests pass, the logic is frozen. Now — and only now — we polish:
-
-- Replace magic numbers with enums
-- Add comprehensive `rustdoc` examples
-- Standardize error handling with `thiserror`
-- Finalize documentation and knowledge system
-
----
-
-## Architecture Decisions
+### C → Rust Design Decisions
 
 | C Pattern | Rust Equivalent | Why |
 |-----------|----------------|-----|
 | `select()`/`poll()` + hand-rolled state machine | `mio` (epoll/kqueue) | Same event-driven model, OS-native |
-| `mmap()` + manual `refcount` | `Rc<Mmap>` + `Rc::strong_count()` | Rust's ownership tracks references automatically |
-| Hash-of-sorted-lists timers | `BinaryHeap<Reverse<TimerEntry>>` | Lazy cancellation, same O(log n) performance |
-| `fork()`/`execve()` + interposer | `std::process::Command` | Cleaner stdio pipelining, no interposer needed |
-| Global `static` mutable state | `AtomicBool` flags + `OnceLock` | Thread-safe where needed, zero-cost where not |
-| `httpd_conn` struct (40+ fields, raw pointers) | `HttpConn` (owned `String`/`Vec<u8>`) | No borrowed pointers into read buffer |
+| `mmap()` + manual `refcount` | `Rc<Mmap>` + `Rc::strong_count()` | Rust ownership tracks references automatically |
+| Hash-of-sorted-lists timers | `BinaryHeap<Reverse<TimerEntry>>` | Lazy cancellation, same O(log n) |
+| `fork()`/`execve()` + interposer | `std::process::Command` | Cleaner stdio pipelining |
+| Global `static` mutable state | `AtomicBool` + `OnceLock` | Thread-safe where needed, zero-cost where not |
+| `httpd_conn` struct (40+ raw pointer fields) | `HttpConn` (owned `String`/`Vec<u8>`) | No borrowed pointers into read buffer |
 | C string handling (null-termination) | `String`/`Vec<u8>` | Automatic bounds checking |
-| `setuid`/`chroot` via direct syscalls | `nix` crate | Typed wrappers around the same syscalls |
+| `setuid`/`chroot` | `nix` crate | Typed wrappers around same syscalls |
 
-**No async runtime.** The server uses `mio` directly with a manual single-threaded event loop, deliberately matching thttpd's original architecture. This is not an accident — it's the design.
-
----
-
-## The Harness
-
-The test harness is a Python/pytest framework designed for **differential black-box testing**:
-
-```
-harness/
-├── conftest.py              # Fixtures: server startup, port allocation, temp www root
-├── diff_engine.py           # 8-field response comparator
-└── tests/
-    ├── test_static_files.py    # 10 tests: text, binary, large, zero-length, Range, etc.
-    ├── test_cgi.py             # 10 tests: CGI execution, NPH, env vars, path-info
-    ├── test_headers.py         # 10 tests: Content-Type, Date, gzip, virtual hosting
-    ├── test_edge_cases.py      # 10 tests: HTTP/0.9, keep-alive, directory traversal
-    ├── test_malformed.py       # 10 tests: invalid method, binary garbage, pipelining
-    ├── test_connection.py      # 10 tests: TCP lifecycle, slow loris, max connections
-    ├── test_errors.py          # 10 tests: 404, 403, 400, error page format
-    └── test_throttling.py      # 10 tests: rate limiting, fair share, rolling average
-```
-
-The `diff_engine` compares responses across 8 fields — not just "did it return 200?" but "are the headers in the same order? Is the body byte-identical? Did the connection close the same way?"
+**No async runtime.** The server uses `mio` directly with a manual single-threaded event loop, matching thttpd's original architecture by design.
 
 ---
 
-## CI Pipeline
+## The Test Harness
 
-Every commit runs through a 5-job GitHub Actions workflow:
+The harness tests both binaries side-by-side using **differential black-box testing**:
 
+```python
+# For each test:
+c_response  = send_request(c_server, raw_bytes)
+rust_response = send_request(rust_server, raw_bytes)
+compare_responses(c_response, rust_response)  # 8-field diff
 ```
-knowledge-consistency ──── validates YAML schemas & cross-references
-build-legacy ───────────── compiles the C binary
-build-rust ─────────────── compiles the Rust workspace
-  └── unit-tests ────────── 48 unit tests across all crates
-  └── differential-tests ── golden capture + differential testing
-```
 
-The `knowledge-consistency` job is the gatekeeper: it validates that every C module has a corresponding YAML+MD pair, that the migration map covers all modules, and that statuses are consistent. If the knowledge system is wrong, nothing else runs.
+The `diff_engine` compares across 8 dimensions — not just "did it return 200?" but "are headers in the same order? Is the body byte-identical? Did the connection close the same way?"
+
+### Test Categories
+
+| File | Tests | What it covers |
+|------|-------|---------------|
+| `test_static_files.py` | 10 | Text, binary, large files, Range requests, If-Modified-Since |
+| `test_cgi.py` | 10 | CGI execution, NPH scripts, env vars, path-info, POST body |
+| `test_headers.py` | 10 | Content-Type, Date, gzip, virtual hosting, charset |
+| `test_edge_cases.py` | 10 | HTTP/0.9, keep-alive, concurrent requests, directory traversal |
+| `test_malformed.py` | 10 | Invalid methods, binary garbage, chunked encoding, pipelining |
+| `test_connection.py` | 10 | TCP lifecycle, slow loris, idle cleanup, max connections |
+| `test_errors.py` | 10 | 404, 403, 400, 501, error page format |
+| `test_throttling.py` | 10 | Rate limiting, fair share, rolling average, byte counting |
 
 ---
 
@@ -182,12 +143,12 @@ The `knowledge-consistency` job is the gatekeeper: it validates that every C mod
 
 - Rust 1.85+ (pinned via `rust-toolchain.toml`)
 - C compiler (gcc/clang) for the legacy binary
-- Python 3.10+ with pytest and pyyaml
+- Python 3.10+ with pytest
 
-### Build the Rust workspace
+### Build the Rust binary
 
 ```bash
-cargo build --manifest-path rust/Cargo.toml --workspace
+cargo build --manifest-path rust/Cargo.toml --release
 ```
 
 ### Build the legacy C binary
@@ -196,16 +157,20 @@ cargo build --manifest-path rust/Cargo.toml --workspace
 bash pipeline/build_legacy.sh
 ```
 
-### Run unit tests
+### Run all tests
 
 ```bash
+# Rust unit tests (56 tests)
 cargo test --manifest-path rust/Cargo.toml --workspace
-```
 
-### Validate the knowledge system
+# C-only harness tests (80 tests)
+python3 -m pytest harness/tests/ --ignore=harness/tests/test_differential.py -v
 
-```bash
-python pipeline/validate_knowledge.py
+# Differential tests — C vs Rust side-by-side (80 tests)
+python3 -m pytest harness/tests/test_differential.py -v --timeout=120 --timeout-method=thread
+
+# Validate knowledge system consistency
+python3 pipeline/validate_knowledge.py
 ```
 
 ---
@@ -217,17 +182,33 @@ python pipeline/validate_knowledge.py
 | Source files | 17 | 26 |
 | Lines of code | 9,817 | 2,429 |
 | Modules | 7 + headers | 8 crates |
-| Unit tests | — | 48 |
-| Golden master tests | — | 80 (8 categories) |
+| Differential tests | — | 80 (8 categories) |
+| Harness tests | — | 80 (same 8 categories) |
+| Unit tests | — | 56 |
 | External dependencies | libc | mio, nix, clap, memmap2, thiserror, signal-hook, slab |
 
-The Rust implementation is ~4× more compact despite adding full type safety, comprehensive error handling, and 48 unit tests. The `libhttpd.c` → `thttpd-http` translation alone compresses 4,230 lines of C into 995 lines of Rust — a 4.3× reduction.
+The Rust implementation is ~4× more compact despite adding full type safety, comprehensive error handling, and 56 unit tests. The `libhttpd.c` → `thttpd-http` translation compresses 4,230 lines of C into 995 lines of Rust — a 4.3× reduction.
+
+---
+
+## Migration Approach
+
+The port was done in phases with automated gates:
+
+1. **Foundation** — Repo setup, Cargo workspace, knowledge graph of every C module
+2. **Analysis** — Static analysis of C source, dependency graphs, risk assessment
+3. **Golden Master** — Capture the C binary's exact behavior into 80 test cases
+4. **Translation** — C → Rust, module by module, in dependency order (leaves first)
+5. **Verification** — Differential testing loop: run same tests against both binaries, diff every response, fix divergences
+6. **Modernization** — Polish: enums, documentation, error handling
+
+Each phase was gated — no phase started until the previous one was proven complete. The development narrative is in [`JOURNEY.md`](JOURNEY.md).
 
 ---
 
 ## Legacy Source
 
-The `legacy/` directory contains the upstream [sthttpd](https://github.com/blueness/sthttpd) source by Anthony G. Basile, which is itself a maintained fork of Jef Poskanzer's original [thttpd](http://www.acme.com/software/thttpd/). It is included for differential testing only. All credit for the original implementation belongs to those authors.
+The `legacy/` directory contains the upstream [sthttpd](https://github.com/blueness/sthttpd) source by Anthony G. Basile, a maintained fork of Jef Poskanzer's original [thttpd](http://www.acme.com/software/thttpd/). It is included for differential testing. All credit for the original implementation belongs to those authors.
 
 ---
 

@@ -1,4 +1,5 @@
 name: thttpd
 source: legacy/src/thttpd.c
-status: pending
-dependencies: []
+rust_crate: thttpd-core
+status: migrated
+dependencies: [libhttpd, fdwatch, timers, mmc]

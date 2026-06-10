@@ -1,4 +1,5 @@
 name: match
 source: legacy/src/match.c
-status: pending
+rust_crate: thttpd-match
+status: migrated
 dependencies: []

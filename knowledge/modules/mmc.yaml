@@ -1,4 +1,5 @@
 name: mmc
 source: legacy/src/mmc.c
-status: pending
+rust_crate: thttpd-mmc
+status: migrated
 dependencies: []
