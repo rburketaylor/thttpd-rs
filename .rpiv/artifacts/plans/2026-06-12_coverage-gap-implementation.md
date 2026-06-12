@@ -33,7 +33,7 @@ If this session is interrupted or context is lost:
 | 2 | Auth subsystem (crypt + .htpasswd + differential test) | +13 (10 unit + 3 differential) | **DONE** (commit 9c35d31) |
 | 3 | Static file serving hardening (non-CGI exe → 403, pathinfo → 403, Range edges) | +4 differential | **DONE** (commit e8f3217) |
 | 4 | CGI depth (Status:, Location:, nph-multistatus, make_envp headers) | +5 differential | **DONE** (commit 11f255e) |
-| 5 | MIME / encoding (.tar.gz chained, octet-stream default) | ~2 | TODO |
+| 5 | MIME / encoding (.tar.gz chained, octet-stream default) | +5 (3 unit + 2 differential) | **DONE** (commit 9152229) |
 | 6 | Symlink edge cases (circular, absolute-target, de_dotdot) | ~3 | TODO |
 | 7 | Virtual hosting (vhost_map, two Host: headers) | ~2 | TODO |
 | 8 | Throttle file parsing (comment lines, min-max, ThrottleTable::load) | ~3 | TODO |
@@ -509,3 +509,9 @@ docs: update for completed coverage gap implementation
 - **CGI Location: only**: treated as 302 (was returning 200 in Rust)
 - **Accept-Language header**: now parsed and propagated to CGI as HTTP_ACCEPT_LANGUAGE
 - **Cumulative test count**: 250 → 255
+
+### Phase 5 — DONE (commit 9152229, 2026-06-12)
+- **figure_mime() ported**: walks extensions right-to-left, matches encodings then types
+- **.tar.gz → gzip + application/x-tar** (was: gz as type, no encoding)
+- **Header order**: Content-Encoding moved before Content-Length to match C
+- **Cumulative test count**: 255 → 260
