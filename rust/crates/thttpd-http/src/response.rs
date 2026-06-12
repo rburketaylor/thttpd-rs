@@ -95,9 +95,10 @@ pub fn build_full_response(
     let now_str = thttpd_tdate::format_http_date(now_ts);
     let mod_str = thttpd_tdate::format_http_date(mod_time);
 
-    // Apply charset to text/* types
+    // Apply charset to text/* types (use http.charset if set, else default)
+    let charset = if http.charset.is_empty() { "iso-8859-1" } else { http.charset.as_str() };
     let fixed_type = if content_type.starts_with("text/") && !content_type.contains("charset=") {
-        format!("{}; charset=iso-8859-1", content_type)
+        format!("{}; charset={}", content_type, charset)
     } else {
         content_type.to_string()
     };

@@ -58,6 +58,9 @@ pub struct HttpConn {
     pub user_agent: String,
     pub cookie: String,
     pub authorization: String,
+    /// Server charset (set from -T flag, default "iso-8859-1").
+    /// Used to append "charset=..." to text/* Content-Type headers.
+    pub charset: String,
     pub accept: String,
     pub accept_encoding: String,
     pub accept_language: String,
@@ -120,6 +123,7 @@ impl HttpConn {
             user_agent: String::new(),
             cookie: String::new(),
             authorization: String::new(),
+            charset: String::from("iso-8859-1"),
             accept: String::new(),
             accept_encoding: String::new(),
             accept_language: String::new(),
@@ -170,6 +174,7 @@ impl HttpConn {
         self.user_agent.clear();
         self.cookie.clear();
         self.authorization.clear();
+        self.charset = String::from("iso-8859-1");
         self.accept.clear();
         self.accept_encoding.clear();
         self.accept_language.clear();

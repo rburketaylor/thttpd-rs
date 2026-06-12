@@ -1943,6 +1943,42 @@ class TestDifferentialThrottle:
     'min-max' format, unparsable lines, leading-slash stripping.
     """
 
+    def test_charset_override(self, c_binary, rust_binary, tmp_path):
+        """Server started with -T utf-8 should return Content-Type with charset=utf-8.
+        Matches libhttpd.c:636 — `my_snprintf(fixed_type, ..., type, hc->hs->charset)`.
+        Rust's response.rs was hardcoded iso-8859-1; now uses http.charset."""
+        import subprocess
+        from conftest import find_free_port
+        www = tmp_path / "www_charset"
+        www.mkdir(exist_ok=True)
+        (www / "page.html").write_text("<html>test</html>")
+        for binary in [c_binary, rust_binary]:
+            port = find_free_port()
+            proc = subprocess.Popen(
+                [binary, "-p", str(port), "-D", "-d", str(www), "-T", "utf-8"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            try:
+                import socket
+                import time
+                time.sleep(0.5)
+                s = socket.socket(); s.settimeout(2)
+                s.connect(('127.0.0.1', port))
+                s.send(b'GET /page.html HTTP/1.0\r\n\r\n')
+                data = b''
+                while True:
+                    try:
+                        c = s.recv(4096)
+                        if not c: break
+                        data += c
+                    except: break
+                s.close()
+                # Verify Content-Type uses utf-8
+                assert b'charset=utf-8' in data, f"charset=utf-8 not in response from {binary}"
+            finally:
+                proc.terminate()
+                proc.wait(timeout=3)
+
     def test_throttle_min_max_format(self, c_binary, rust_binary, tmp_path):
         """Throttle file with min-max format is accepted by both servers.
         C: thttpd.c:1408 'min-max' sscanf format. Rust: parse_line with '-' split."""

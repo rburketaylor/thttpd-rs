@@ -649,6 +649,10 @@ fn process_request(server: &mut Server, slab_key: usize) {
 
 /// Serve a static file.
 fn serve_static(server: &mut Server, slab_key: usize, file_path: &Path) {
+    // Propagate the configured charset to the connection so response
+    // builders can use it for Content-Type text/* responses.
+    server.conns[slab_key].http.charset = server.config.charset.clone();
+
     // --- Symlink escape prevention ---
     let file_path = {
         let canonical_root = match std::fs::canonicalize(&server.config.dir) {
@@ -1007,6 +1011,9 @@ fn serve_static(server: &mut Server, slab_key: usize, file_path: &Path) {
 
 /// Dispatch a CGI request.
 fn dispatch_cgi(server: &mut Server, slab_key: usize, _script_path: &Path) {
+    // Propagate the configured charset to the connection
+    server.conns[slab_key].http.charset = server.config.charset.clone();
+
     let (method, orig_filename, query, host, peer_addr, content_type, content_length,
          user_agent, referer, accept, accept_encoding, accept_language, cookie, path_info, x_forwarded_for) = {
         let slot = &server.conns[slab_key];
