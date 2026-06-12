@@ -30,7 +30,7 @@ If this session is interrupted or context is lost:
 | Phase | Description | Tests added | Status |
 |-------|-------------|-------------|--------|
 | 1 | Parser hardening (HTTP/9.9, Crlfcr, case-insensitive method, X-Forwarded-For) | +14 (11 unit + 3 differential) | **DONE** (commit 5bfec35) |
-| 2 | Auth subsystem (crypt + .htpasswd + differential test) | ~3 | TODO |
+| 2 | Auth subsystem (crypt + .htpasswd + differential test) | +13 (10 unit + 3 differential) | **DONE** (commit 9c35d31) |
 | 3 | Static file serving hardening (non-CGI exe → 403, pathinfo → 403, Range edges) | ~5 | TODO |
 | 4 | CGI depth (Status:, Location:, nph-multistatus, make_envp headers) | ~6 | TODO |
 | 5 | MIME / encoding (.tar.gz chained, octet-stream default) | ~2 | TODO |
@@ -487,9 +487,14 @@ docs: update for completed coverage gap implementation
 - **Tests added**: 7 FSM unit, 4 XFF unit, 3 differential = 14 total.
 - **Cumulative test count**: 219 → 233.
 
-### Phase 2
-- **Started:** (fill in)
-- **Status:** TODO
+### Phase 2 — DONE (commit 9c35d31, 2026-06-12)
+- **Basic Auth**: Full implementation of libhttpd.c:995-1147 (auth_check2).
+- **libc + base64 deps added**; build.rs links libcrypt.
+- **crypt(3) thread-safety**: Added global Mutex because glibc's crypt() returns a non-thread-local buffer.
+- **.htpasswd fixture**: `secret/.htpasswd` with user 'alice' / 'secret' (MD5 crypt).
+- **Realm = URL directory**: Matches C's send_authenticate(hc, dirname) where dirname is the relative expnfilename.
+- **Tests added**: 10 unit (parse, verify, edge cases) + 3 differential.
+- **Cumulative test count**: 233 → 246.
 
 ### Phase 3
 - ...
