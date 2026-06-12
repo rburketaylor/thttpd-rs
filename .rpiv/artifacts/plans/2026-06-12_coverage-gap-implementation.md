@@ -32,7 +32,7 @@ If this session is interrupted or context is lost:
 | 1 | Parser hardening (HTTP/9.9, Crlfcr, case-insensitive method, X-Forwarded-For) | +14 (11 unit + 3 differential) | **DONE** (commit 5bfec35) |
 | 2 | Auth subsystem (crypt + .htpasswd + differential test) | +13 (10 unit + 3 differential) | **DONE** (commit 9c35d31) |
 | 3 | Static file serving hardening (non-CGI exe → 403, pathinfo → 403, Range edges) | +4 differential | **DONE** (commit e8f3217) |
-| 4 | CGI depth (Status:, Location:, nph-multistatus, make_envp headers) | ~6 | TODO |
+| 4 | CGI depth (Status:, Location:, nph-multistatus, make_envp headers) | +5 differential | **DONE** (commit 11f255e) |
 | 5 | MIME / encoding (.tar.gz chained, octet-stream default) | ~2 | TODO |
 | 6 | Symlink edge cases (circular, absolute-target, de_dotdot) | ~3 | TODO |
 | 7 | Virtual hosting (vhost_map, two Host: headers) | ~2 | TODO |
@@ -503,3 +503,9 @@ docs: update for completed coverage gap implementation
 - **orig_filename updated to resolved script** so dispatch_cgi uses correct script
 - **Range edge tests** added: open-ended bytes=0- → 200, out-of-bounds bytes=99999- → 200
 - **Cumulative test count**: 246 → 250
+
+### Phase 4 — DONE (commit 11f255e, 2026-06-12)
+- **CGI Status: header**: matches C's fixed titles (200/302/etc.) and 'Something' for unknown
+- **CGI Location: only**: treated as 302 (was returning 200 in Rust)
+- **Accept-Language header**: now parsed and propagated to CGI as HTTP_ACCEPT_LANGUAGE
+- **Cumulative test count**: 250 → 255
