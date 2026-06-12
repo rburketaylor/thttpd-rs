@@ -11,6 +11,8 @@ thttpd-tdate = { workspace = true }
 thttpd-mmc = { workspace = true }
 memmap2 = { workspace = true }
 thiserror = { workspace = true }
+libc = { workspace = true }
+base64 = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

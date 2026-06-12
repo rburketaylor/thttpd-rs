@@ -1542,3 +1542,60 @@ class TestDifferentialParserHardening:
         )
         # C's IPv6 bug means it ignores XFF — REMOTE_ADDR is the peer (127.0.0.1).
         # Verified for documentation: NOT calling _assert_match here.
+
+
+# =========================================================================
+# Phase 2: Basic Auth (.htpasswd)
+# =========================================================================
+
+class TestDifferentialAuth:
+    """Differential tests for Basic Auth (libhttpd.c:972-1147).
+
+    Tests a .htpasswd file with user 'alice' / password 'secret'
+    (MD5 crypt hash) in the `secret/` subdirectory.
+    """
+
+    def test_auth_missing_returns_401(self, dual_server_process):
+        """No Authorization header for a file in a .htpasswd-protected dir → 401."""
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        req = b'GET /secret/data.txt HTTP/1.0\r\n\r\n'
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port, req, "auth.missing"
+        )
+        assert c_resp['status_code'] == 401
+        assert rust_resp['status_code'] == 401
+        # Both must include WWW-Authenticate header
+        assert 'www-authenticate' in c_resp['headers']
+        assert 'www-authenticate' in rust_resp['headers']
+        # And it should be Basic auth with realm
+        assert 'Basic' in c_resp['headers']['www-authenticate']
+        assert 'Basic' in rust_resp['headers']['www-authenticate']
+        _assert_match(results)
+
+    def test_auth_wrong_password_returns_401(self, dual_server_process):
+        """Wrong password → 401 with WWW-Authenticate."""
+        import base64
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        bad_auth = b'Basic ' + base64.b64encode(b'alice:wrongpass')
+        req = b'GET /secret/data.txt HTTP/1.0\r\nAuthorization: ' + bad_auth + b'\r\n\r\n'
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port, req, "auth.wrong_password"
+        )
+        assert c_resp['status_code'] == 401
+        assert rust_resp['status_code'] == 401
+        _assert_match(results)
+
+    def test_auth_correct_password_returns_200(self, dual_server_process):
+        """Correct password → 200 with the file content."""
+        import base64
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        good_auth = b'Basic ' + base64.b64encode(b'alice:secret')
+        req = b'GET /secret/data.txt HTTP/1.0\r\nAuthorization: ' + good_auth + b'\r\n\r\n'
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port, req, "auth.correct_password"
+        )
+        assert c_resp['status_code'] == 200
+        assert rust_resp['status_code'] == 200
+        assert b'secret content' in c_resp['body']
+        assert b'secret content' in rust_resp['body']
+        _assert_match(results)

@@ -5,6 +5,7 @@ pub mod cgi;
 pub mod conn;
 pub mod dirlist;
 pub mod error;
+pub mod auth;
 pub mod method;
 pub mod parse;
 pub mod parse_state;

@@ -179,6 +179,16 @@ def www_root_session(tmp_path_factory):
     )
     (cgi_bin / "pathinfo.sh").chmod(0o755)
 
+    # Auth-protected directory with .htpasswd
+    secret = www / "secret"
+    secret.mkdir()
+    (secret / "data.txt").write_text("secret content")
+    # MD5 crypt hash of "secret" with salt "abcd" — generated via:
+    #   openssl passwd -1 -salt abcd secret
+    #   => $1$abcd$Oy8OD9LGKv7H9yIMreLNV1
+    (secret / ".htpasswd").write_text("alice:$1$abcd$Oy8OD9LGKv7H9yIMreLNV1\n")
+    (secret / ".htpasswd").chmod(0o644)
+
     return www
 
 

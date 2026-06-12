@@ -623,6 +623,61 @@ fn serve_static(server: &mut Server, slab_key: usize, file_path: &Path) {
         }
     };
 
+    // --- Basic Auth check (libhttpd.c:3732-3773) ---
+    // If a .htpasswd file exists in the directory tree containing the
+    // requested file, require Basic Auth. Returns 401 if missing or wrong.
+    {
+        let (authorization, encoded_url) = {
+            let slot = &server.conns[slab_key];
+            (slot.http.authorization.clone(), slot.http.encoded_url.clone())
+        };
+        match thttpd_http::auth::auth_check2(&file_path, &authorization) {
+            thttpd_http::auth::AuthResult::NoAuthFile | thttpd_http::auth::AuthResult::Ok => {
+                // No auth required or auth successful — continue
+            }
+            thttpd_http::auth::AuthResult::Unauthorized => {
+                // Send 401 Unauthorized with WWW-Authenticate: Basic realm="..."
+                // Realm is the URL directory path (no leading slash), matching
+                // C's `send_authenticate(hc, dirname)` where dirname is derived
+                // from the relative expnfilename.
+                let realm = encoded_url
+                    .rsplit_once('/')
+                    .map(|(dir, _)| dir.trim_start_matches('/'))
+                    .unwrap_or("")
+                    .to_string();
+                let user_agent = server.conns[slab_key].http.user_agent.clone();
+                let body = error_page(
+                    401,
+                    thttpd_http::auth::ERR_401_TITLE,
+                    thttpd_http::auth::ERR_401_FORM,
+                    &encoded_url,
+                    Some(&user_agent),
+                );
+                let extra_headers: [(String, String); 1] = [(
+                    "WWW-Authenticate".to_string(),
+                    format!("Basic realm=\"{}\"", realm),
+                )];
+                let http_ref = &server.conns[slab_key].http;
+                let response = build_full_response(
+                    http_ref, 401, thttpd_http::auth::ERR_401_TITLE,
+                    "text/html", -1, 0, &extra_headers,
+                );
+                let full_response = if http_ref.mime_flag {
+                    let mut r = response;
+                    r.extend_from_slice(&body);
+                    r
+                } else {
+                    body
+                };
+                let slot = &mut server.conns[slab_key];
+                slot.http.response = full_response;
+                slot.http.response_len = slot.http.response.len();
+                transition_to_sending(server, slab_key);
+                return;
+            }
+        }
+    }
+
     // Directory listing
     if metadata.is_dir() {
         let url_path = server.conns[slab_key].http.orig_filename.clone();
