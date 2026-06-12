@@ -8,16 +8,16 @@
 
 thttpd has served the internet since 1995. It's small (~9,800 lines of C), fast, secure, and does one thing well: serve static files over HTTP with CGI support and bandwidth throttling. But it's written in C — manual memory management, raw pointer arithmetic, `fork()`/`exec()` CGI dispatch, and hand-rolled I/O multiplexing.
 
-This project answers a question: **can you port a 30-year-old C server to Rust without changing a single observable behavior?** Not "looks similar." Not "mostly equivalent." **Byte-exact parity**, proven by running 80 differential tests that compare the C and Rust binaries side-by-side across status code, headers, body, and connection lifecycle.
+This project answers a question: **can you port a 30-year-old C server to Rust without changing a single observable behavior?** Not "looks similar." Not "mostly equivalent." **Byte-exact parity**, proven by running 81 differential tests that compare the C and Rust binaries side-by-side across status code, headers, body, and connection lifecycle.
 
 The answer is **yes**. Every test passes:
 
 | Suite | Result |
 |---|---|
-| Differential tests (C vs Rust) | **80 / 80** |
+| Differential tests (C vs Rust) | **81 / 81** |
 | C-only harness tests | **80 / 80** |
-| Rust unit tests | **56 / 56** |
-| **Total** | **216 / 216** |
+| Rust unit tests | **58 / 58** |
+| **Total** | **219 / 219** |
 
 ---
 
@@ -160,13 +160,13 @@ bash pipeline/build_legacy.sh
 ### Run all tests
 
 ```bash
-# Rust unit tests (56 tests)
+# Rust unit tests (58 tests)
 cargo test --manifest-path rust/Cargo.toml --workspace
 
 # C-only harness tests (80 tests)
 python3 -m pytest harness/tests/ --ignore=harness/tests/test_differential.py -v
 
-# Differential tests — C vs Rust side-by-side (80 tests)
+# Differential tests — C vs Rust side-by-side (81 tests)
 python3 -m pytest harness/tests/test_differential.py -v --timeout=120 --timeout-method=thread
 
 # Validate knowledge system consistency
@@ -182,12 +182,12 @@ python3 pipeline/validate_knowledge.py
 | Source files | 17 | 26 |
 | Lines of code | 9,817 | 2,429 |
 | Modules | 7 + headers | 8 crates |
-| Differential tests | — | 80 (8 categories) |
-| Harness tests | — | 80 (same 8 categories) |
-| Unit tests | — | 56 |
+| Differential tests | — | 81 (8 categories) |
+| Harness tests | — | 80 (C-only, same 8 categories) |
+| Unit tests | — | 58 |
 | External dependencies | libc | mio, nix, clap, memmap2, thiserror, signal-hook, slab |
 
-The Rust implementation is ~4× more compact despite adding full type safety, comprehensive error handling, and 56 unit tests. The `libhttpd.c` → `thttpd-http` translation compresses 4,230 lines of C into 995 lines of Rust — a 4.3× reduction.
+The Rust implementation is ~4× more compact despite adding full type safety, comprehensive error handling, and 58 unit tests. The `libhttpd.c` → `thttpd-http` translation compresses 4,230 lines of C into 995 lines of Rust — a 4.3× reduction.
 
 ---
 

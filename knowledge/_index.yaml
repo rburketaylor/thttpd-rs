@@ -34,3 +34,8 @@ modules:
     rust_crate: thttpd-tdate
     status: migrated
     dependencies: []
+  - name: mime
+    source: legacy/src/mime_types.h
+    rust_crate: thttpd-mime
+    status: migrated
+    dependencies: []

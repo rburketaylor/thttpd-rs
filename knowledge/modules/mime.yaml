@@ -1,0 +1,8 @@
+name: mime
+source: legacy/src/mime_types.h
+rust_crate: thttpd-mime
+status: migrated
+dependencies: []
+functions:
+  - mime_type
+  - mime_encoding

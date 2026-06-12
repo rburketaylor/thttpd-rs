@@ -1,6 +1,6 @@
 # thttpd-rs — Rust Workspace
 
-A byte-exact Rust port of sthttpd 2.27.0, proven by 80 differential tests against the original C binary.
+A byte-exact Rust port of sthttpd 2.27.0, proven by 81 differential tests against the original C binary.
 
 ## Crate Map
 
@@ -37,7 +37,7 @@ cargo build --workspace
 # Release build (for testing against C binary)
 cargo build --release
 
-# Run all unit tests (56 tests)
+# Run all unit tests (58 tests)
 cargo test --workspace
 ```
 

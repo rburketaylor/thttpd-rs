@@ -127,11 +127,11 @@ When no `Content-Length` header was present (e.g. `Transfer-Encoding: chunked`),
 
 | Suite | Result |
 |---|---|
-| Differential tests (C vs Rust) | **80/80** ✅ |
+| Differential tests (C vs Rust) | **81/81** ✅ |
 | C-only harness tests | **80/80** ✅ |
-| Rust unit tests | **56/56** ✅ |
+| Rust unit tests | **58/58** ✅ |
 | Pipeline validation | **PASS** ✅ |
-| **Total** | **216/216** |
+| **Total** | **219/219** |
 
 All 7 previously deferred slow-lifecycle tests now pass: connection timeout, slow loris, idle connection cleanup, multiple connections, keep-alive, pipelined requests, and throttle pause/resume.
 
@@ -153,4 +153,4 @@ All 7 previously deferred slow-lifecycle tests now pass: connection timeout, slo
 
 ## The Verdict
 
-The migration is **complete**. The Rust binary is a fully validated, byte-exact drop-in replacement for the C thttpd. 216 tests pass with zero failures across three independent test suites.
+The migration is **complete**. The Rust binary is a fully validated, byte-exact drop-in replacement for the C thttpd. 219 tests pass with zero failures across three independent test suites.

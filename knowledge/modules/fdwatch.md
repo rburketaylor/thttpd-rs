@@ -4,7 +4,7 @@
 `legacy/src/fdwatch.c` (838 lines) → `rust/crates/thttpd-fdwatch/src/lib.rs` (72 lines)
 
 ## Status
-Migrated. 80/80 differential tests pass.
+Migrated. 81/81 differential tests pass.
 
 ## What It Does
 Abstracts I/O multiplexing (poll/select/epoll). In C, this was a portable wrapper around multiple OS APIs. In Rust, `mio` provides the same capability natively, so this crate is a thin layer providing token constants and type aliases.

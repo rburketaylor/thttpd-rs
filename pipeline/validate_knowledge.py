@@ -45,7 +45,10 @@ def main():
         print(f"Found {len(migrations)} migration entries")
 
         # Verify all modules are covered
-        migrated_modules = {m["c_module"].replace(".c", "") for m in migrations}
+        migrated_modules = {
+            m["c_module"].replace(".c", "").replace(".h", "")
+            for m in migrations
+        }
         indexed_modules = {m["name"] for m in modules}
 
         missing = indexed_modules - migrated_modules

@@ -4,7 +4,7 @@
 `legacy/src/thttpd.c` (2,189 lines) → `rust/crates/thttpd-core/src/` (454 lines across 7 modules)
 
 ## Status
-Migrated. 80/80 differential tests pass.
+Migrated. 81/81 differential tests pass.
 
 ## What It Does
 The main event loop and server orchestration. Accepts connections, reads requests, dispatches to static file serving or CGI, writes responses, and manages connection lifecycle.

@@ -4,7 +4,7 @@
 `legacy/src/match.c` → `rust/crates/thttpd-match/src/lib.rs`
 
 ## Status
-Migrated. 80/80 differential tests pass.
+Migrated. 81/81 differential tests pass.
 
 ## What It Does
 Implements shell-style wildcard pattern matching (`*`, `?`, `[...]`) used for CGI pattern matching and URL filtering. Direct translation of the C `match()` function.

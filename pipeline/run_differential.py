@@ -39,7 +39,7 @@ from run_golden_capture import (
 
 # Import the diff engine
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "harness"))
-from diff_engine import compare_responses
+from diff_engine import compare_responses_v2
 
 
 # ---------------------------------------------------------------------------
@@ -127,7 +127,7 @@ def main():
             actual = response_to_jsonable(parse_response(raw))
 
             # Compare using diff engine
-            diffs = compare_responses(expected, actual)
+            diffs = compare_responses_v2(expected, actual)
 
             # Check each field
             test_passed = True
