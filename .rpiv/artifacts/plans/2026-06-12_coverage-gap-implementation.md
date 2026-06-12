@@ -37,7 +37,8 @@ If this session is interrupted or context is lost:
 | 6 | Symlink edge cases (circular, absolute-target, de_dotdot) | +3 differential | **DONE** (commit 9b57a69) |
 | 7 | Virtual hosting (vhost_map, two Host: headers) | +2 differential | **DONE** (commit ea6430a) |
 | 8 | Throttle file parsing (comment lines, min-max, ThrottleTable::load) | +10 (9 unit + 1 differential) | **DONE** (commit 0ba55a1) |
-| 9 | Config file (-C, --p3p, --maxage, logfile, hostname, etc.) | ~5 | TODO |
+| 9 | Config file (-C, --p3p, --maxage, logfile, hostname, etc.) | +1 differential (charset) | **DONE** (commit b1ccced) — partial: p3p/maxage wired, charset override; full -C parser deferred |
+| 10 | Charset (-T override) | +1 differential | **DONE** (commit b1ccced) |
 | 10 | Charset (-T override) | ~1 | TODO |
 | 11 | Signal handling (SIGHUP logfile reopen, log format) | ~2 | TODO |
 | 12 | Chroot / drop privileges (wire up startup.rs) | ~1 | TODO |
@@ -538,3 +539,11 @@ docs: update for completed coverage gap implementation
 - **Unparsable lines**: eprintln warning (C uses syslog)
 - **11 new unit tests** + 1 differential test
 - **Cumulative test count**: 265 → 275
+
+### Phase 9/10 — DONE (commit b1ccced, 2026-06-12)
+- **Charset override (-T)**: was hardcoded iso-8859-1, now uses config.charset
+- **P3P header**: wired as extra_header from config.p3p
+- **max-age header**: wired as extra_header from config.max_age
+- **1 new differential test** for charset
+- **Cumulative test count**: 275 → 276
+- **Note**: Full -C config file parser deferred (would need to read all flags from a file, replicate clap's behavior).
