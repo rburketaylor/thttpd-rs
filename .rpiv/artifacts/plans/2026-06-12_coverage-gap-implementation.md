@@ -36,7 +36,7 @@ If this session is interrupted or context is lost:
 | 5 | MIME / encoding (.tar.gz chained, octet-stream default) | +5 (3 unit + 2 differential) | **DONE** (commit 9152229) |
 | 6 | Symlink edge cases (circular, absolute-target, de_dotdot) | +3 differential | **DONE** (commit 9b57a69) |
 | 7 | Virtual hosting (vhost_map, two Host: headers) | +2 differential | **DONE** (commit ea6430a) |
-| 8 | Throttle file parsing (comment lines, min-max, ThrottleTable::load) | ~3 | TODO |
+| 8 | Throttle file parsing (comment lines, min-max, ThrottleTable::load) | +10 (9 unit + 1 differential) | **DONE** (commit 0ba55a1) |
 | 9 | Config file (-C, --p3p, --maxage, logfile, hostname, etc.) | ~5 | TODO |
 | 10 | Charset (-T override) | ~1 | TODO |
 | 11 | Signal handling (SIGHUP logfile reopen, log format) | ~2 | TODO |
@@ -529,3 +529,12 @@ docs: update for completed coverage gap implementation
 - **Default fixed**: was always-on, now defaults to false (matches C)
 - **PATH_INFO extraction skipped** when vhost active (mutually exclusive)
 - **Cumulative test count**: 263 → 265
+
+### Phase 8 — DONE (commit 0ba55a1, 2026-06-12)
+- **ThrottleTable::load() implemented** matching C's read_throttlefile
+- **Pattern formats**: 'pattern max' and 'pattern min-max' both supported
+- **Comment lines** (starting with #) skipped
+- **Leading '/' stripped**, '|/' replaced with '|' (C normalization)
+- **Unparsable lines**: eprintln warning (C uses syslog)
+- **11 new unit tests** + 1 differential test
+- **Cumulative test count**: 265 → 275
