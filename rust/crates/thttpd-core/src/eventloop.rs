@@ -88,7 +88,14 @@ pub fn run(server: &mut Server) -> io::Result<()> {
 
         // Process signal flags
         if crate::signal::got_hup() {
-            // Re-open log file (no-op for now, log to stderr)
+            // SIGHUP received — re-open log file (libhttpd.c:237-254).
+            // C's re_open_logfile() closes the current log file handle and
+            // reopens it (allowing log rotation). The Rust port currently
+            // doesn't have a persistent log file — this is a no-op. When
+            // full logging support is added, the reopen logic would go here.
+            if let Some(ref logfile) = server.config.logfile {
+                eprintln!("thttpd: SIGHUP — would reopen logfile {:?}", logfile);
+            }
             crate::signal::clear_hup();
         }
     }
