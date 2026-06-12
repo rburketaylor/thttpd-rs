@@ -14,7 +14,7 @@ use thttpd_http::response::{build_full_response, error_page, ResponseBuilder};
 use thttpd_http::Method;
 use thttpd_http::url::{normalize_path, percent_decode};
 use thttpd_match::match_pattern;
-use thttpd_mime::mime_type;
+use thttpd_mime::figure_mime;
 use std::time::Duration;
 
 /// Maximum number of connections we accept.
@@ -876,8 +876,14 @@ fn serve_static(server: &mut Server, slab_key: usize, file_path: &Path) {
     if method == Method::Head {
         let http_ref = &server.conns[slab_key].http;
         let filename = file_path.to_string_lossy();
-        let content_type = mime_type(&filename);
-        let response = build_full_response(http_ref, 200, "OK", content_type, file_size, file_mtime, &[]);
+        let mime_info = figure_mime(&filename);
+        let content_type = mime_info.mime_type;
+        let extra_headers: Vec<(String, String)> = if let Some(enc) = mime_info.encoding {
+            vec![("Content-Encoding".to_string(), enc.to_string())]
+        } else {
+            Vec::new()
+        };
+        let response = build_full_response(http_ref, 200, "OK", content_type, file_size, file_mtime, &extra_headers);
         let full_response = if http_ref.mime_flag { response } else { Vec::new() };
         let slot = &mut server.conns[slab_key];
         slot.http.response = full_response;
@@ -892,8 +898,14 @@ fn serve_static(server: &mut Server, slab_key: usize, file_path: &Path) {
         if ims >= file_mtime {
             let http_ref = &server.conns[slab_key].http;
             let filename = file_path.to_string_lossy();
-            let content_type = mime_type(&filename);
-            let response = build_full_response(http_ref, 304, "Not Modified", content_type, -1, file_mtime, &[]);
+            let mime_info = figure_mime(&filename);
+            let content_type = mime_info.mime_type;
+            let extra_headers: Vec<(String, String)> = if let Some(enc) = mime_info.encoding {
+                vec![("Content-Encoding".to_string(), enc.to_string())]
+            } else {
+                Vec::new()
+            };
+            let response = build_full_response(http_ref, 304, "Not Modified", content_type, -1, file_mtime, &extra_headers);
             let full_response = if http_ref.mime_flag { response } else { Vec::new() };
             let slot = &mut server.conns[slab_key];
             slot.http.response = full_response;
@@ -911,7 +923,8 @@ fn serve_static(server: &mut Server, slab_key: usize, file_path: &Path) {
     match mmap_result {
         Ok(mmap) => {
             let filename = file_path.to_string_lossy();
-            let content_type = mime_type(&filename);
+            let mime_info = figure_mime(&filename);
+            let content_type = mime_info.mime_type;
             let http_ref = &server.conns[slab_key].http;
 
             let is_range = http_ref.got_range;
@@ -931,7 +944,12 @@ fn serve_static(server: &mut Server, slab_key: usize, file_path: &Path) {
                 mmap.to_vec()
             };
 
-            let response = build_full_response(http_ref, 200, "OK", content_type, file_size, file_mtime, &[]);
+            let extra_headers: Vec<(String, String)> = if let Some(enc) = mime_info.encoding {
+                vec![("Content-Encoding".to_string(), enc.to_string())]
+            } else {
+                Vec::new()
+            };
+            let response = build_full_response(http_ref, 200, "OK", content_type, file_size, file_mtime, &extra_headers);
             let slot = &mut server.conns[slab_key];
             let full_response = if slot.http.mime_flag { let mut r = response; r.extend_from_slice(&body); r } else { body };
             slot.http.file_address = Some(mmap);

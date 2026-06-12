@@ -139,6 +139,15 @@ pub fn build_full_response(
         out.extend_from_slice(b"Cache-Control: no-cache,no-store\r\n");
     }
 
+    // Content-Encoding (if any) — placed BEFORE Content-Range/Content-Length
+    // to match C's send_mime order at libhttpd.c:649-654.
+    // Look for "Content-Encoding" in extra_headers (passed in by caller).
+    for (name, value) in extra_headers {
+        if name.eq_ignore_ascii_case("Content-Encoding") {
+            out.extend_from_slice(format!("Content-Encoding: {}\r\n", value).as_bytes());
+        }
+    }
+
     // Content-Range + Content-Length for partial content, or just Content-Length
     if partial_content {
         let range_len = http.last_byte_index - http.first_byte_index + 1;
@@ -151,9 +160,11 @@ pub fn build_full_response(
         out.extend_from_slice(format!("Content-Length: {}\r\n", length).as_bytes());
     }
 
-    // Extra headers (P3P, Cache-Control max-age, etc.)
+    // Extra headers (P3P, Cache-Control max-age, etc.) — Content-Encoding already emitted above
     for (name, value) in extra_headers {
-        out.extend_from_slice(format!("{}: {}\r\n", name, value).as_bytes());
+        if !name.eq_ignore_ascii_case("Content-Encoding") {
+            out.extend_from_slice(format!("{}: {}\r\n", name, value).as_bytes());
+        }
     }
 
     // Blank line

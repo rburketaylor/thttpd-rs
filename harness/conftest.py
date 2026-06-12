@@ -232,6 +232,11 @@ def www_root_session(tmp_path_factory):
     (www / "executable.txt").write_text("I'm executable but not CGI")
     (www / "executable.txt").chmod(0o755)
 
+    # .tar.gz — tests figure_mime chained encoding (libhttpd.c:2607-2618)
+    (www / "archive.tar.gz").write_bytes(b"fake-tar-gz-content")
+    # .zzz — tests application/octet-stream default (xyz is in C's table as chemical/x-xyz)
+    (www / "data.zzz").write_text("unknown extension data")
+
     return www
 
 

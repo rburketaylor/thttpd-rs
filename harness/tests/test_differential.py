@@ -1771,3 +1771,48 @@ class TestDifferentialCgiDepth:
             assert c_value in c_body, f"C missing {header_name}: {c_body[:300]}"
             assert r_value in rust_body, f"Rust missing {header_name}: {rust_body[:300]}"
         _assert_match(results)
+
+
+# =========================================================================
+# Phase 5: MIME / encoding
+# =========================================================================
+
+class TestDifferentialMime:
+    """Differential tests for MIME type and content-encoding.
+
+    Covers libhttpd.c:2538-2621 (figure_mime) — peels off encoding
+    extensions right-to-left, then looks for the type extension.
+    """
+
+    def test_tar_gz_chained_encoding(self, dual_server_process):
+        """archive.tar.gz → Content-Encoding: gzip, Content-Type: application/x-tar.
+        Matches libhttpd.c:2607-2618 — chained encodings are emitted
+        in the order they were peeled (rightmost first)."""
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        req = b'GET /archive.tar.gz HTTP/1.0\r\n\r\n'
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port, req, "mime.tar_gz"
+        )
+        # Both must include Content-Encoding: gzip
+        assert c_resp['headers'].get('content-encoding') == 'gzip', \
+            f"C: {c_resp['headers']}"
+        assert rust_resp['headers'].get('content-encoding') == 'gzip', \
+            f"Rust: {rust_resp['headers']}"
+        # And Content-Type: application/x-tar
+        assert c_resp['headers'].get('content-type') == 'application/x-tar', \
+            f"C: {c_resp['headers']}"
+        assert rust_resp['headers'].get('content-type') == 'application/x-tar', \
+            f"Rust: {rust_resp['headers']}"
+        _assert_match(results)
+
+    def test_unknown_extension_octet_stream(self, dual_server_process):
+        """Unknown extension → Content-Type: application/octet-stream.
+        Matches libhttpd.c:2547 (default_type)."""
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        req = b'GET /data.zzz HTTP/1.0\r\n\r\n'
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port, req, "mime.octet_stream"
+        )
+        assert c_resp['headers'].get('content-type') == 'application/octet-stream'
+        assert rust_resp['headers'].get('content-type') == 'application/octet-stream'
+        _assert_match(results)

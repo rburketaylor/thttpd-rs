@@ -3,4 +3,4 @@
 
 mod types;
 
-pub use types::{mime_encoding, mime_type};
+pub use types::{figure_mime, mime_encoding, mime_type, MimeInfo};
