@@ -31,7 +31,7 @@ If this session is interrupted or context is lost:
 |-------|-------------|-------------|--------|
 | 1 | Parser hardening (HTTP/9.9, Crlfcr, case-insensitive method, X-Forwarded-For) | +14 (11 unit + 3 differential) | **DONE** (commit 5bfec35) |
 | 2 | Auth subsystem (crypt + .htpasswd + differential test) | +13 (10 unit + 3 differential) | **DONE** (commit 9c35d31) |
-| 3 | Static file serving hardening (non-CGI exe → 403, pathinfo → 403, Range edges) | ~5 | TODO |
+| 3 | Static file serving hardening (non-CGI exe → 403, pathinfo → 403, Range edges) | +4 differential | **DONE** (commit e8f3217) |
 | 4 | CGI depth (Status:, Location:, nph-multistatus, make_envp headers) | ~6 | TODO |
 | 5 | MIME / encoding (.tar.gz chained, octet-stream default) | ~2 | TODO |
 | 6 | Symlink edge cases (circular, absolute-target, de_dotdot) | ~3 | TODO |
@@ -496,7 +496,10 @@ docs: update for completed coverage gap implementation
 - **Tests added**: 10 unit (parse, verify, edge cases) + 3 differential.
 - **Cumulative test count**: 233 → 246.
 
-### Phase 3
-- ...
-
-(etc.)
+### Phase 3 — DONE (commit e8f3217, 2026-06-12)
+- **Non-CGI executable → 403** (libhttpd.c:3790): added check in serve_static
+- **Pathinfo on non-CGI → 403** (libhttpd.c:3801): added check in process_request
+- **PATH_INFO extraction moved to process_request** (so the pathinfo check can fire before serve_static)
+- **orig_filename updated to resolved script** so dispatch_cgi uses correct script
+- **Range edge tests** added: open-ended bytes=0- → 200, out-of-bounds bytes=99999- → 200
+- **Cumulative test count**: 246 → 250
