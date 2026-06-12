@@ -167,6 +167,29 @@ class TestDifferentialStatic:
         )
         _assert_match(results)
 
+    def test_get_nonexistent_msie_user_agent(self, dual_server_process):
+        """MSIE user agent triggers 6-line padding block in error page
+        (libhttpd.c:742-749). Both servers must emit the same bytes."""
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        req = (
+            b'GET /nonexistent.txt HTTP/1.0\r\n'
+            b'User-Agent: Mozilla/4.0 (compatible; MSIE 6.0; Windows NT 5.1)\r\n'
+            b'\r\n'
+        )
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port, req, "static.get_nonexistent_msie"
+        )
+        # Both must include the MSIE padding block
+        assert b'Padding so that MSIE deigns to show this error' in c_resp['body']
+        assert b'Padding so that MSIE deigns to show this error' in rust_resp['body']
+        # And exactly 6 lines (matching C's `for (n=0; n<6; n++)`)
+        assert c_resp['body'].count(b'Padding so that MSIE') == 6
+        assert rust_resp['body'].count(b'Padding so that MSIE') == 6
+        # And it must come BEFORE <HR> (matching C's send_response + send_response_tail order)
+        assert c_resp['body'].index(b'<!--') < c_resp['body'].index(b'<HR>')
+        assert rust_resp['body'].index(b'<!--') < rust_resp['body'].index(b'<HR>')
+        _assert_match(results)
+
 
 # =========================================================================
 # CGI execution
