@@ -35,7 +35,7 @@ If this session is interrupted or context is lost:
 | 4 | CGI depth (Status:, Location:, nph-multistatus, make_envp headers) | +5 differential | **DONE** (commit 11f255e) |
 | 5 | MIME / encoding (.tar.gz chained, octet-stream default) | +5 (3 unit + 2 differential) | **DONE** (commit 9152229) |
 | 6 | Symlink edge cases (circular, absolute-target, de_dotdot) | +3 differential | **DONE** (commit 9b57a69) |
-| 7 | Virtual hosting (vhost_map, two Host: headers) | ~2 | TODO |
+| 7 | Virtual hosting (vhost_map, two Host: headers) | +2 differential | **DONE** (commit ea6430a) |
 | 8 | Throttle file parsing (comment lines, min-max, ThrottleTable::load) | ~3 | TODO |
 | 9 | Config file (-C, --p3p, --maxage, logfile, hostname, etc.) | ~5 | TODO |
 | 10 | Charset (-T override) | ~1 | TODO |
@@ -522,3 +522,10 @@ docs: update for completed coverage gap implementation
   (C detects the loop with MAX_LINKS; Rust's std::fs::canonicalize bails
   earlier). Both fail safely (not 200). Documented in test.
 - **Cumulative test count**: 260 → 263
+
+### Phase 7 — DONE (commit ea6430a, 2026-06-12)
+- **Virtual hosting implemented**: Host: foo.com looks in <www>/foo.com/<path>
+- **vhost_dir field** added to HttpConn
+- **Default fixed**: was always-on, now defaults to false (matches C)
+- **PATH_INFO extraction skipped** when vhost active (mutually exclusive)
+- **Cumulative test count**: 263 → 265
