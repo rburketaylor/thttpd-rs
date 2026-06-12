@@ -415,6 +415,11 @@ fn process_request(server: &mut Server, slab_key: usize) {
             slot.http.accept_encoding = ae;
         }
 
+        // Accept-Language
+        if let Some(al) = extract_header(headers_bytes, "Accept-Language") {
+            slot.http.accept_language = al;
+        }
+
         // Cookie
         if let Some(ck) = extract_header(headers_bytes, "Cookie") {
             slot.http.cookie = ck;
@@ -954,7 +959,7 @@ fn serve_static(server: &mut Server, slab_key: usize, file_path: &Path) {
 /// Dispatch a CGI request.
 fn dispatch_cgi(server: &mut Server, slab_key: usize, _script_path: &Path) {
     let (method, orig_filename, query, host, peer_addr, content_type, content_length,
-         user_agent, referer, accept, accept_encoding, cookie, path_info, x_forwarded_for) = {
+         user_agent, referer, accept, accept_encoding, accept_language, cookie, path_info, x_forwarded_for) = {
         let slot = &server.conns[slab_key];
         (
             slot.http.method.as_str().to_string(),
@@ -968,6 +973,7 @@ fn dispatch_cgi(server: &mut Server, slab_key: usize, _script_path: &Path) {
             slot.http.referer.clone(),
             slot.http.accept.clone(),
             slot.http.accept_encoding.clone(),
+            slot.http.accept_language.clone(),
             slot.http.cookie.clone(),
             slot.http.path_info.clone(),
             slot.http.x_forwarded_for.clone(),
@@ -1033,6 +1039,7 @@ fn dispatch_cgi(server: &mut Server, slab_key: usize, _script_path: &Path) {
     if !referer.is_empty() { http_headers.insert("Referer".to_string(), referer); }
     if !accept.is_empty() { http_headers.insert("Accept".to_string(), accept); }
     if !accept_encoding.is_empty() { http_headers.insert("Accept-Encoding".to_string(), accept_encoding); }
+    if !accept_language.is_empty() { http_headers.insert("Accept-Language".to_string(), accept_language); }
     if !cookie.is_empty() { http_headers.insert("Cookie".to_string(), cookie); }
 
     // Compute REMOTE_ADDR. C uses httpd_ntoa (libhttpd.c:4063-4085) which:
@@ -1159,6 +1166,12 @@ fn dispatch_cgi(server: &mut Server, slab_key: usize, _script_path: &Path) {
 }
 
 /// Extract status code and text from CGI output headers.
+/// Extract status code and text from CGI output headers.
+/// Matches C's cgi_interpose_output logic at libhttpd.c:3258-3295:
+///   1. Look for "HTTP/" status line
+///   2. Else look for "Status:" header (overrides default 200)
+///   3. Else if "Location:" header present, set 302
+///   4. Map known status codes to their text; unknown → "Something"
 fn extract_cgi_status(output: &[u8]) -> (u16, String) {
     let blank_pos = output.windows(4)
         .position(|w| w == b"\r\n\r\n")
@@ -1172,23 +1185,46 @@ fn extract_cgi_status(output: &[u8]) -> (u16, String) {
     let header_bytes = &output[..header_end];
     let header_str = String::from_utf8_lossy(header_bytes);
 
+    let mut status: u16 = 200;
+    let mut status_set = false;
+
     for line in header_str.lines() {
         if let Some(colon_pos) = line.find(':') {
             let name = &line[..colon_pos];
             if name.trim().eq_ignore_ascii_case("status") {
                 let value = line[colon_pos + 1..].trim();
-                if let Some(space_pos) = value.find(' ') {
-                    if let Ok(code) = value[..space_pos].parse::<u16>() {
-                        return (code, value[space_pos + 1..].to_string());
-                    }
-                } else if let Ok(code) = value.parse::<u16>() {
-                    return (code, String::new());
+                // C: status = atoi( value ) — takes the leading number
+                let code_str: String = value
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect();
+                if let Ok(code) = code_str.parse::<u16>() {
+                    status = code;
+                    status_set = true;
                 }
+            } else if !status_set && name.trim().eq_ignore_ascii_case("location") {
+                // C: if no Status: header and Location: is present, set 302
+                status = 302;
+                status_set = true;
             }
         }
     }
 
-    (200, "OK".to_string())
+    let title = match status {
+        200 => "OK",
+        302 => "Found",
+        304 => "Not Modified",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        408 => "Request Timeout",
+        500 => "Internal Error",
+        501 => "Not Implemented",
+        503 => "Service Unavailable",
+        _ => "Something",
+    };
+    (status, title.to_string())
 }
 
 /// Send response bytes to the connection.

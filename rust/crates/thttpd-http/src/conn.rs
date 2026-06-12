@@ -57,6 +57,7 @@ pub struct HttpConn {
     pub authorization: String,
     pub accept: String,
     pub accept_encoding: String,
+    pub accept_language: String,
     pub if_modified_since: Option<i64>,
 
     // HTTP/0.9 mode
@@ -117,6 +118,7 @@ impl HttpConn {
             authorization: String::new(),
             accept: String::new(),
             accept_encoding: String::new(),
+            accept_language: String::new(),
             if_modified_since: None,
 
             mime_flag: true,
@@ -165,6 +167,7 @@ impl HttpConn {
         self.authorization.clear();
         self.accept.clear();
         self.accept_encoding.clear();
+        self.accept_language.clear();
         self.if_modified_since = None;
         self.mime_flag = true;
         self.got_range = false;

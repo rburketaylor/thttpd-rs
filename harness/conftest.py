@@ -179,6 +179,45 @@ def www_root_session(tmp_path_factory):
     )
     (cgi_bin / "pathinfo.sh").chmod(0o755)
 
+    # CGI script that returns Status: 418 (unknown status → "Something")
+    (cgi_bin / "status_418.sh").write_text(
+        '#!/bin/sh\necho "Status: 418 I am a teapot"\necho "Content-Type: text/plain"\necho ""\necho "teapot"\n'
+    )
+    (cgi_bin / "status_418.sh").chmod(0o755)
+
+    # CGI script that returns only Location: header (treated as 302)
+    (cgi_bin / "location_only.sh").write_text(
+        '#!/bin/sh\necho "Location: /elsewhere"\necho "Content-Type: text/plain"\necho ""\n'
+    )
+    (cgi_bin / "location_only.sh").chmod(0o755)
+
+    # CGI script that returns Status: 302 + Location:
+    (cgi_bin / "status_302.sh").write_text(
+        '#!/bin/sh\necho "Status: 302 Found"\necho "Location: /elsewhere"\necho "Content-Type: text/plain"\necho ""\n'
+    )
+    (cgi_bin / "status_302.sh").chmod(0o755)
+
+    # CGI script that returns Status: 500
+    (cgi_bin / "status_500.sh").write_text(
+        '#!/bin/sh\necho "Status: 500 Server Error"\necho "Content-Type: text/plain"\necho ""\necho "oops"\n'
+    )
+    (cgi_bin / "status_500.sh").chmod(0o755)
+
+    # CGI script that echoes all expected env vars
+    (cgi_bin / "env_full.sh").write_text(
+        '#!/bin/sh\necho "Content-Type: text/plain"\necho ""\n'
+        'echo "REDIRECT_STATUS=200"\n'
+        'echo "GATEWAY_INTERFACE=$GATEWAY_INTERFACE"\n'
+        'echo "HTTP_REFERER=$HTTP_REFERER"\n'
+        'echo "HTTP_USER_AGENT=$HTTP_USER_AGENT"\n'
+        'echo "HTTP_ACCEPT=$HTTP_ACCEPT"\n'
+        'echo "HTTP_ACCEPT_LANGUAGE=$HTTP_ACCEPT_LANGUAGE"\n'
+        'echo "HTTP_ACCEPT_ENCODING=$HTTP_ACCEPT_ENCODING"\n'
+        'echo "HTTP_COOKIE=$HTTP_COOKIE"\n'
+        'echo "HTTP_HOST=$HTTP_HOST"\n'
+    )
+    (cgi_bin / "env_full.sh").chmod(0o755)
+
     # Auth-protected directory with .htpasswd
     secret = www / "secret"
     secret.mkdir()

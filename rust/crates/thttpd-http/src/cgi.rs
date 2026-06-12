@@ -79,7 +79,7 @@ pub fn build_envp(ctx: &CgiContext, script_path: &str, cgi_pattern: &str) -> Vec
     }
 
     // HTTP_* headers in C's fixed order
-    let fixed_order = ["Referer", "User-Agent", "Accept", "Accept-Encoding", "Cookie", "Host"];
+    let fixed_order = ["Referer", "User-Agent", "Accept", "Accept-Encoding", "Accept-Language", "Cookie", "Host"];
     for header in &fixed_order {
         if let Some(value) = ctx.http_headers.get(*header) {
             let env_key = format!("HTTP_{}", header.to_uppercase().replace('-', "_"));

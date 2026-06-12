@@ -1676,3 +1676,98 @@ class TestDifferentialStaticHardening:
         assert c_resp['status_code'] in (200, 206), f"C: {c_resp['status_code']}"
         assert rust_resp['status_code'] in (200, 206), f"Rust: {rust_resp['status_code']}"
         _assert_match(results)
+
+
+# =========================================================================
+# Phase 4: CGI depth (Status:, Location:, nph-multistatus)
+# =========================================================================
+
+class TestDifferentialCgiDepth:
+    """Differential tests for CGI Status:/Location: header handling.
+
+    Covers libhttpd.c:3258-3295 — cgi_interpose_output's parsing of:
+      - Status: header (overrides default 200)
+      - Location: header alone (treated as 302)
+      - Known status codes use their title; unknown use "Something"
+    """
+
+    def test_cgi_status_418_unknown(self, dual_server_process):
+        """CGI returns Status: 418 (unknown code) → 418 "Something".
+        C uses 'Something' for unknown codes (libhttpd.c:3294)."""
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        req = b'GET /cgi-bin/status_418.sh HTTP/1.0\r\n\r\n'
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port, req, "cgi.status_418"
+        )
+        assert c_resp['status_code'] == 418
+        assert rust_resp['status_code'] == 418
+        # Status text should be "Something" (not "I am a teapot")
+        assert c_resp['status_text'] == 'Something', f"C: {c_resp['status_text']}"
+        assert rust_resp['status_text'] == 'Something', f"Rust: {rust_resp['status_text']}"
+        _assert_match(results)
+
+    def test_cgi_location_only_returns_302(self, dual_server_process):
+        """CGI returns only Location: header (no Status:) → 302.
+        C's else-if at libhttpd.c:3273-3275 treats Location-only as 302."""
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        req = b'GET /cgi-bin/location_only.sh HTTP/1.0\r\n\r\n'
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port, req, "cgi.location_only"
+        )
+        assert c_resp['status_code'] == 302
+        assert rust_resp['status_code'] == 302
+        assert c_resp['status_text'] == 'Found'
+        assert rust_resp['status_text'] == 'Found'
+        _assert_match(results)
+
+    def test_cgi_status_302_with_location(self, dual_server_process):
+        """CGI returns Status: 302 + Location: → 302 Found."""
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        req = b'GET /cgi-bin/status_302.sh HTTP/1.0\r\n\r\n'
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port, req, "cgi.status_302"
+        )
+        assert c_resp['status_code'] == 302
+        assert rust_resp['status_code'] == 302
+        _assert_match(results)
+
+    def test_cgi_status_500(self, dual_server_process):
+        """CGI returns Status: 500 → 500 Internal Error."""
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        req = b'GET /cgi-bin/status_500.sh HTTP/1.0\r\n\r\n'
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port, req, "cgi.status_500"
+        )
+        assert c_resp['status_code'] == 500
+        assert rust_resp['status_code'] == 500
+        _assert_match(results)
+
+    def test_cgi_env_full_headers(self, dual_server_process):
+        """CGI sees HTTP_REFERER, HTTP_USER_AGENT, HTTP_ACCEPT, etc.
+        Matches libhttpd.c:3002-3080 (make_envp coverage of HTTP_* vars)."""
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        req = (
+            b'GET /cgi-bin/env_full.sh HTTP/1.0\r\n'
+            b'Referer: http://example.com/page\r\n'
+            b'User-Agent: TestAgent/1.0\r\n'
+            b'Accept: text/html\r\n'
+            b'Accept-Language: en-US\r\n'
+            b'Accept-Encoding: gzip\r\n'
+            b'Cookie: session=abc123\r\n'
+            b'\r\n'
+        )
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port, req, "cgi.env_full"
+        )
+        c_body = c_resp['body'].decode('latin-1', errors='replace')
+        rust_body = rust_resp['body'].decode('latin-1', errors='replace')
+        # Both must propagate all the request headers as CGI env vars
+        for header_name in ['HTTP_REFERER', 'HTTP_USER_AGENT', 'HTTP_ACCEPT',
+                            'HTTP_ACCEPT_LANGUAGE', 'HTTP_ACCEPT_ENCODING',
+                            'HTTP_COOKIE']:
+            expected = header_name.replace('HTTP_', '').replace('_', '-').title()
+            c_value = f'{header_name}='
+            r_value = f'{header_name}='
+            assert c_value in c_body, f"C missing {header_name}: {c_body[:300]}"
+            assert r_value in rust_body, f"Rust missing {header_name}: {rust_body[:300]}"
+        _assert_match(results)
