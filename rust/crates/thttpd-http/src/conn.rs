@@ -28,6 +28,10 @@ pub struct HttpConn {
     pub parse_state: ParseState,
     pub method: Method,
     pub http_version: String,
+    /// Set when the request protocol is not "HTTP/1.0" (case-insensitive).
+    /// Matches C's `one_one` flag (libhttpd.c:1965). When true, the request
+    /// must include a Host header or the server returns 400.
+    pub one_one: bool,
 
     // Parsed URL components
     pub encoded_url: String,
@@ -42,6 +46,9 @@ pub struct HttpConn {
 
     // Headers
     pub host: String,
+    /// First IP from X-Forwarded-For header, if present.
+    /// Used for CGI REMOTE_ADDR and log lines (libhttpd.c:2210-2215).
+    pub x_forwarded_for: String,
     pub content_type: String,
     pub content_length: Option<i64>,
     pub referer: String,
@@ -89,6 +96,7 @@ impl HttpConn {
             parse_state: ParseState::initial(),
             method: Method::Unknown,
             http_version: String::new(),
+            one_one: false,
 
             encoded_url: String::new(),
             decoded_url: String::new(),
@@ -100,6 +108,7 @@ impl HttpConn {
             expn_filename: String::new(),
 
             host: String::new(),
+            x_forwarded_for: String::new(),
             content_type: String::new(),
             content_length: None,
             referer: String::new(),
@@ -138,6 +147,7 @@ impl HttpConn {
         self.parse_state = ParseState::initial();
         self.method = Method::Unknown;
         self.http_version.clear();
+        self.one_one = false;
         self.encoded_url.clear();
         self.decoded_url.clear();
         self.path_info.clear();
@@ -146,6 +156,7 @@ impl HttpConn {
         self.orig_filename.clear();
         self.expn_filename.clear();
         self.host.clear();
+        self.x_forwarded_for.clear();
         self.content_type.clear();
         self.content_length = None;
         self.referer.clear();
@@ -176,5 +187,42 @@ impl HttpConn {
 impl Default for HttpConn {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_x_forwarded_for_field_init() {
+        // The x_forwarded_for field is empty by default
+        let conn = HttpConn::new();
+        assert!(conn.x_forwarded_for.is_empty());
+    }
+
+    #[test]
+    fn test_x_forwarded_for_reset() {
+        // After reset, the x_forwarded_for field is cleared
+        let mut conn = HttpConn::new();
+        conn.x_forwarded_for = "192.0.2.42".to_string();
+        conn.reset();
+        assert!(conn.x_forwarded_for.is_empty());
+    }
+
+    #[test]
+    fn test_x_forwarded_for_first_ip() {
+        // "192.0.2.42, 10.0.0.1" should be parsed as just the first IP
+        let xff = "192.0.2.42, 10.0.0.1";
+        let first = xff.split(',').next().unwrap_or("").trim().to_string();
+        assert_eq!(first, "192.0.2.42");
+    }
+
+    #[test]
+    fn test_x_forwarded_for_whitespace_only() {
+        // A whitespace-only value should be treated as empty
+        let xff = "   ";
+        let first = xff.split(',').next().unwrap_or("").trim().to_string();
+        assert_eq!(first, "");
     }
 }

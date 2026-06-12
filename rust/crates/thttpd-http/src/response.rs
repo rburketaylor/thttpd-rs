@@ -116,8 +116,14 @@ pub fn build_full_response(
             (status, status_text, false)
         };
 
-    // Status line
-    out.extend_from_slice(format!("HTTP/1.0 {} {}\r\n", final_status, final_status_text).as_bytes());
+    // Status line — use the request's protocol version (C uses hc->protocol at
+    // libhttpd.c:638). Fall back to HTTP/1.0 for HTTP/0.9 (no version token).
+    let protocol = if http.http_version.is_empty() {
+        "HTTP/1.0".to_string()
+    } else {
+        http.http_version.clone()
+    };
+    out.extend_from_slice(format!("{} {} {}\r\n", protocol, final_status, final_status_text).as_bytes());
 
     // Standard headers in C order
     out.extend_from_slice(format!("Server: {}\r\n", SERVER_SOFTWARE).as_bytes());

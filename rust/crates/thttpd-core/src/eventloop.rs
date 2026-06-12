@@ -278,7 +278,12 @@ fn process_request(server: &mut Server, slab_key: usize) {
     {
         let slot = &mut server.conns[slab_key];
         slot.http.method = method;
-        slot.http.http_version = version_str;
+        slot.http.http_version = version_str.clone();
+        // C: if protocol is not "HTTP/1.0" (case-insensitive), set one_one=1
+        // (libhttpd.c:1965). one_one requires a Host header.
+        slot.http.one_one = has_version
+            && !version_str.is_empty()
+            && !version_str.eq_ignore_ascii_case("HTTP/1.0");
         slot.http.encoded_url = url_str.clone();
         slot.http.host = host_str;
         slot.http.mime_flag = has_version; // HTTP/0.9 when no version token
@@ -291,31 +296,29 @@ fn process_request(server: &mut Server, slab_key: usize) {
         }
     }
 
-    // Validate HTTP version — reject anything other than HTTP/1.0 or HTTP/1.1
-    if has_version {
-        let bad_version = {
-            let v = &server.conns[slab_key].http.http_version;
-            v != "HTTP/1.0" && v != "HTTP/1.1"
+    // one_one requires Host header (libhttpd.c:2250-2255). C returns 400 if
+    // one_one is set but no Host header was provided.
+    if server.conns[slab_key].http.one_one
+        && server.conns[slab_key].http.host.is_empty()
+    {
+        let user_agent = server.conns[slab_key].http.user_agent.clone();
+        let v = server.conns[slab_key].http.http_version.clone();
+        let body = error_page(400, "Bad Request", "Your request has bad syntax or is inherently impossible to satisfy.\n", &v, Some(&user_agent));
+        let http_ref = &server.conns[slab_key].http;
+        let response = build_full_response(http_ref, 400, "Bad Request", "text/html", -1, 0, &[]);
+        let full_response = if http_ref.mime_flag {
+            let mut r = response;
+            r.extend_from_slice(&body);
+            r
+        } else {
+            body
         };
-        if bad_version {
-            let v = server.conns[slab_key].http.http_version.clone();
-            let user_agent = server.conns[slab_key].http.user_agent.clone();
-            let body = error_page(400, "Bad Request", "Your request has bad syntax or is inherently impossible to satisfy.\n", &v, Some(&user_agent));
-            let http_ref = &server.conns[slab_key].http;
-            let response = build_full_response(http_ref, 400, "Bad Request", "text/html", -1, 0, &[]);
-            let full_response = if http_ref.mime_flag {
-                let mut r = response;
-                r.extend_from_slice(&body);
-                r
-            } else {
-                body
-            };
-            let slot = &mut server.conns[slab_key];
-            slot.http.response = full_response;
-            slot.http.response_len = slot.http.response.len();
-            transition_to_sending(server, slab_key);
-            return;
-        }
+        let len = full_response.len();
+        let slot = &mut server.conns[slab_key];
+        slot.http.response = full_response;
+        slot.http.response_len = len;
+        transition_to_sending(server, slab_key);
+        return;
     }
 
     // Unknown method → 501
@@ -420,6 +423,16 @@ fn process_request(server: &mut Server, slab_key: usize) {
         // Authorization
         if let Some(auth) = extract_header(headers_bytes, "Authorization") {
             slot.http.authorization = auth;
+        }
+
+        // X-Forwarded-For — first IP is the original client (libhttpd.c:2210).
+        // Used for CGI REMOTE_ADDR and log lines.
+        if let Some(xff) = extract_header(headers_bytes, "X-Forwarded-For") {
+            // XFF can be "client, proxy1, proxy2" — C takes the first one
+            let first = xff.split(',').next().unwrap_or("").trim().to_string();
+            if !first.is_empty() {
+                slot.http.x_forwarded_for = first;
+            }
         }
     }
 
@@ -773,7 +786,7 @@ fn serve_static(server: &mut Server, slab_key: usize, file_path: &Path) {
 /// Dispatch a CGI request.
 fn dispatch_cgi(server: &mut Server, slab_key: usize, _script_path: &Path) {
     let (method, orig_filename, query, host, peer_addr, content_type, content_length,
-         user_agent, referer, accept, accept_encoding, cookie, path_info) = {
+         user_agent, referer, accept, accept_encoding, cookie, path_info, x_forwarded_for) = {
         let slot = &server.conns[slab_key];
         (
             slot.http.method.as_str().to_string(),
@@ -789,6 +802,7 @@ fn dispatch_cgi(server: &mut Server, slab_key: usize, _script_path: &Path) {
             slot.http.accept_encoding.clone(),
             slot.http.cookie.clone(),
             slot.http.path_info.clone(),
+            slot.http.x_forwarded_for.clone(),
         )
     };
 
@@ -853,8 +867,29 @@ fn dispatch_cgi(server: &mut Server, slab_key: usize, _script_path: &Path) {
     if !accept_encoding.is_empty() { http_headers.insert("Accept-Encoding".to_string(), accept_encoding); }
     if !cookie.is_empty() { http_headers.insert("Cookie".to_string(), cookie); }
 
-    // Strip port from remote_addr — but HTTP_HOST should also not include port
-    let remote_addr_clean = peer_addr.rsplit_once(':').map(|(ip, _)| ip).unwrap_or(&peer_addr).to_string();
+    // Compute REMOTE_ADDR. C uses httpd_ntoa (libhttpd.c:4063-4085) which:
+    //   1. Uses X-Forwarded-For first IP if present (libhttpd.c:2210)
+    //   2. Strips "::ffff:" prefix from IPv4-mapped IPv6 addresses
+    //   3. Falls back to inet_ntoa (plain IPv4)
+    let remote_addr_clean = if !x_forwarded_for.is_empty() {
+        x_forwarded_for.clone()
+    } else {
+        // Strip port, then strip "::ffff:" prefix from IPv4-mapped addresses.
+        // SocketAddr::to_string() for an IPv4-mapped addr gives "[::ffff:127.0.0.1]:port"
+        // or "::ffff:127.0.0.1:port" depending on formatting. Strip port first.
+        let without_port = peer_addr
+            .rsplit_once(':')
+            .map(|(ip, _)| ip)
+            .unwrap_or(&peer_addr)
+            .trim_start_matches('[')
+            .trim_end_matches(']');
+        // Strip the IPv6-style "::ffff:" prefix if present (mirrors C at libhttpd.c:4077)
+        if let Some(stripped) = without_port.strip_prefix("::ffff:") {
+            stripped.to_string()
+        } else {
+            without_port.to_string()
+        }
+    };
     let _host_clean = host.rsplit_once(':').map(|(ip, _)| ip).unwrap_or(&host).to_string();
 
     // Get hostname via gethostname()

@@ -9,6 +9,8 @@ use crate::parse_state::{GotRequest, ParseState};
 /// `initial_state` is the parser state from the previous call (persists
 /// across incremental reads, matching C's `hc->checked_state`).
 /// Returns (result, new_checked_idx, final_state).
+///
+/// The transition table is byte-exact with `libhttpd.c:1773-1922`.
 pub fn got_request(read_buf: &[u8], mut checked_idx: usize, read_idx: usize, initial_state: ParseState) -> (GotRequest, usize, ParseState) {
     let mut state = initial_state;
 
@@ -19,13 +21,17 @@ pub fn got_request(read_buf: &[u8], mut checked_idx: usize, read_idx: usize, ini
             ParseState::FirstWord => match c {
                 b' ' | b'\t' => ParseState::FirstWs,
                 b'\r' | b'\n' => {
-                    // C: CR/LF before a complete word is malformed
+                    // CR/LF before a complete word is malformed
                     return (GotRequest::BadRequest, checked_idx, ParseState::Bogus);
                 }
                 _ => ParseState::FirstWord,
             },
             ParseState::FirstWs => match c {
                 b' ' | b'\t' => ParseState::FirstWs,
+                b'\r' | b'\n' => {
+                    // Whitespace then CR/LF is malformed (libhttpd.c:1794-1797)
+                    return (GotRequest::BadRequest, checked_idx, ParseState::Bogus);
+                }
                 _ => ParseState::SecondWord,
             },
             ParseState::SecondWord => match c {
@@ -38,6 +44,10 @@ pub fn got_request(read_buf: &[u8], mut checked_idx: usize, read_idx: usize, ini
             },
             ParseState::SecondWs => match c {
                 b' ' | b'\t' => ParseState::SecondWs,
+                b'\r' | b'\n' => {
+                    // Whitespace then CR/LF is malformed (libhttpd.c:1818-1821)
+                    return (GotRequest::BadRequest, checked_idx, ParseState::Bogus);
+                }
                 _ => ParseState::ThirdWord,
             },
             ParseState::ThirdWord => match c {
@@ -47,18 +57,25 @@ pub fn got_request(read_buf: &[u8], mut checked_idx: usize, read_idx: usize, ini
                 _ => ParseState::ThirdWord,
             },
             ParseState::ThirdWs => match c {
+                b' ' | b'\t' => ParseState::ThirdWs,
                 b'\r' => ParseState::Cr,
                 b'\n' => ParseState::Lf,
-                _ => ParseState::ThirdWs,
+                _ => {
+                    // Non-LF/CR/WS after request line is malformed (libhttpd.c:1851-1854)
+                    return (GotRequest::BadRequest, checked_idx, ParseState::Bogus);
+                }
             },
             ParseState::Lf => match c {
-                b'\r' => ParseState::Crlf,
+                b'\r' => ParseState::Cr,
                 b'\n' => return (GotRequest::GotRequest, checked_idx + 1, ParseState::GotRequest),
                 _ => ParseState::Line,
             },
             ParseState::Cr => match c {
                 b'\n' => ParseState::Crlf,
-                // C: any non-LF after CR transitions to LINE (not Bogus)
+                b'\r' => {
+                    // Two CRs in a row — end of request (libhttpd.c:1887-1889)
+                    return (GotRequest::GotRequest, checked_idx + 1, ParseState::GotRequest);
+                }
                 _ => ParseState::Line,
             },
             ParseState::Crlf => match c {
@@ -72,8 +89,11 @@ pub fn got_request(read_buf: &[u8], mut checked_idx: usize, read_idx: usize, ini
                 _ => ParseState::Line,
             },
             ParseState::Crlfcr => match c {
-                b'\n' => return (GotRequest::GotRequest, checked_idx + 1, ParseState::GotRequest),
-                // C: any non-LF after CRLF+CR transitions to LINE (not Bogus)
+                b'\r' | b'\n' => {
+                    // Two CRLFs or two CRs in a row — end of request
+                    // (libhttpd.c:1912-1914). Rust previously only accepted \n.
+                    return (GotRequest::GotRequest, checked_idx + 1, ParseState::GotRequest);
+                }
                 _ => ParseState::Line,
             },
             ParseState::GotRequest | ParseState::Bogus => {
@@ -163,5 +183,72 @@ mod tests {
         assert_eq!(parse_method(b"GET / HTTP/1.0\r\n", 14), Method::Get);
         assert_eq!(parse_method(b"POST / HTTP/1.0\r\n", 15), Method::Post);
         assert_eq!(parse_method(b"HEAD / HTTP/1.0\r\n", 15), Method::Head);
+    }
+
+    // ---- Phase 1 FSM terminator tests (libhttpd.c byte-exact parity) ----
+
+    /// Crlfcr state: C accepts both \r and \n as terminator (libhttpd.c:1912).
+    /// Previously Rust only accepted \n.
+    #[test]
+    fn test_crlfcr_cr_terminator() {
+        // \r\n\r\r — the second \r in the Crlfcr state ends the request
+        let buf = b"GET / HTTP/1.0\r\n\r\r";
+        let (result, _, _) = got_request(buf, 0, buf.len(), ParseState::FirstWord);
+        assert_eq!(result, GotRequest::GotRequest);
+    }
+
+    /// Cr state: two CRs in a row end the request (libhttpd.c:1887-1889).
+    #[test]
+    fn test_cr_cr_terminator() {
+        let buf = b"GET / HTTP/1.0\r\r";
+        let (result, _, _) = got_request(buf, 0, buf.len(), ParseState::FirstWord);
+        assert_eq!(result, GotRequest::GotRequest);
+    }
+
+    /// Lf state: \r goes to Cr (not Crlf). libhttpd.c:1873-1875.
+    /// Combined with the Cr→Crlf transition, \n\r\n is NOT end of request.
+    #[test]
+    fn test_lf_cr_not_end() {
+        // \n\r\n — C considers this incomplete (Lf→Cr, Cr→Crlf, no \n)
+        let buf = b"GET / HTTP/1.0\n\r\n";
+        let (result, _, _) = got_request(buf, 0, buf.len(), ParseState::FirstWord);
+        // Crlf state, not end of request
+        assert_eq!(result, GotRequest::NoRequest);
+    }
+
+    /// Lf state: two \n in a row end the request (libhttpd.c:1867-1872).
+    #[test]
+    fn test_lf_lf_terminator() {
+        let buf = b"GET / HTTP/1.0\n\n";
+        let (result, _, _) = got_request(buf, 0, buf.len(), ParseState::FirstWord);
+        assert_eq!(result, GotRequest::GotRequest);
+    }
+
+    /// FirstWs with \r or \n is malformed (libhttpd.c:1794-1797).
+    /// Previously Rust treated \r in FirstWs as start of SecondWord.
+    #[test]
+    fn test_firstws_cr_is_bad() {
+        // "GET \r" — first word is "GET", then whitespace, then CR. C: 400. Rust: was 200.
+        let buf = b"GET \r\n\r\n";
+        let (result, _, _) = got_request(buf, 0, buf.len(), ParseState::FirstWord);
+        assert_eq!(result, GotRequest::BadRequest);
+    }
+
+    /// SecondWs with \r or \n is malformed (libhttpd.c:1818-1821).
+    #[test]
+    fn test_secondws_cr_is_bad() {
+        // "GET / \r" — C: 400. Rust: was 200.
+        let buf = b"GET / \r\n\r\n";
+        let (result, _, _) = got_request(buf, 0, buf.len(), ParseState::FirstWord);
+        assert_eq!(result, GotRequest::BadRequest);
+    }
+
+    /// ThirdWs with non-CR/LF/WS is malformed (libhttpd.c:1851-1854).
+    #[test]
+    fn test_thirdws_garbage_is_bad() {
+        // "GET / HTTP/1.0 X" — extra non-WS char after version is bad
+        let buf = b"GET / HTTP/1.0 X\r\n\r\n";
+        let (result, _, _) = got_request(buf, 0, buf.len(), ParseState::FirstWord);
+        assert_eq!(result, GotRequest::BadRequest);
     }
 }

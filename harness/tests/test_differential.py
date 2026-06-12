@@ -1462,3 +1462,83 @@ class TestDifferentialThrottling:
             )
             assert c_results[i]['status_code'] == 200
             assert rust_results[i]['status_code'] == 200
+
+
+# =========================================================================
+# Phase 1: Parser hardening (HTTP/9.9, Crlfcr, X-Forwarded-For)
+# =========================================================================
+
+class TestDifferentialParserHardening:
+    """Differential tests for parser hardening added in Phase 1.
+
+    Covers the FSM terminator states (Crlfcr, Cr, Lf) and HTTP/1.1
+    Host-header requirement that previously diverged from C.
+    """
+
+    def test_http99_with_host(self, dual_server_process):
+        """HTTP/9.9 with Host header: C treats as 1.1-like, requires Host.
+        Both servers should return 200 with HTTP/9.9 status line."""
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        req = (
+            b'GET /test.txt HTTP/9.9\r\n'
+            b'Host: localhost\r\n'
+            b'\r\n'
+        )
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port, req, "parser.http99_with_host"
+        )
+        # Both must succeed (200) — previously Rust returned 400 even with Host
+        assert c_resp['status_code'] == 200, f"C: {c_resp['status_code']}"
+        assert rust_resp['status_code'] == 200, f"Rust: {rust_resp['status_code']}"
+        # Status line must echo the request version
+        assert c_resp['status_line'].startswith('HTTP/9.9'), f"C: {c_resp['status_line']}"
+        assert rust_resp['status_line'].startswith('HTTP/9.9'), f"Rust: {rust_resp['status_line']}"
+        _assert_match(results)
+
+    def test_http99_no_host(self, dual_server_process):
+        """HTTP/9.9 without Host header: C returns 400 (one_one requires Host).
+        Both servers must return 400 and the status line should be HTTP/9.9."""
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        req = b'GET /test.txt HTTP/9.9\r\n\r\n'
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port, req, "parser.http99_no_host"
+        )
+        assert c_resp['status_code'] == 400
+        assert rust_resp['status_code'] == 400
+        # Status line version must match request
+        assert c_resp['status_line'].startswith('HTTP/9.9'), f"C: {c_resp['status_line']}"
+        assert rust_resp['status_line'].startswith('HTTP/9.9'), f"Rust: {rust_resp['status_line']}"
+        _assert_match(results)
+
+    def test_x_forwarded_for_ignored_by_c(self, dual_server_process):
+        """X-Forwarded-For is silently ignored by C on IPv6 sockets (a real C bug:
+        libhttpd.c:2210 sets sa_in.sin_addr but httpd_ntoa uses getnameinfo
+        which reads sa_in6 — the XFF is overwritten). Rust correctly honors it.
+
+        This test documents the divergence. Rust should show the XFF value in
+        REMOTE_ADDR; C will show the actual peer address. We do NOT call
+        _assert_match here because the body diff would fail (C's bug).
+        """
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        req = (
+            b'GET /cgi-bin/env.sh HTTP/1.0\r\n'
+            b'X-Forwarded-For: 192.0.2.42\r\n'
+            b'\r\n'
+        )
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port, req, "parser.x_forwarded_for"
+        )
+        # Both must succeed with 200 (CGI runs)
+        assert c_resp['status_code'] == 200, f"C: {c_resp['status_code']}"
+        assert rust_resp['status_code'] == 200, f"Rust: {rust_resp['status_code']}"
+        # Both must include REMOTE_ADDR in their CGI output
+        c_body = c_resp['body'].decode('latin-1', errors='replace')
+        rust_body = rust_resp['body'].decode('latin-1', errors='replace')
+        assert 'REMOTE_ADDR=' in c_body
+        assert 'REMOTE_ADDR=' in rust_body
+        # Rust correctly uses the XFF value
+        assert 'REMOTE_ADDR=192.0.2.42' in rust_body, (
+            f"Rust should honor XFF but got: REMOTE_ADDR line in {rust_body[:500]}"
+        )
+        # C's IPv6 bug means it ignores XFF — REMOTE_ADDR is the peer (127.0.0.1).
+        # Verified for documentation: NOT calling _assert_match here.
