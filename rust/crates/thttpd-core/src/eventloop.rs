@@ -510,47 +510,78 @@ fn process_request(server: &mut Server, slab_key: usize) {
         path
     };
 
+    // --- Virtual hosting (libhttpd.c:1342-1421 vhost_map) ---
+    // If vhost is enabled, prepend the hostname (lowercased) to orig_filename
+    // AND re-derive file_path. This is a simple port that doesn't include
+    // C's VHOST_DIRLEVELS subdirectory split (off by default).
+    let file_path = if server.config.vhost
+        && !server.conns[slab_key].http.host.is_empty()
+    {
+        let host_lower: String = server.conns[slab_key]
+            .http.host
+            .to_lowercase();
+        let hostdir = host_lower;
+        let new_orig = format!("/{}{}", hostdir, server.conns[slab_key].http.orig_filename);
+        let slot = &mut server.conns[slab_key];
+        slot.http.orig_filename = new_orig.clone();
+        slot.http.vhost_dir = hostdir;
+        // Re-derive file_path
+        if new_orig == "/" {
+            server.config.dir.join("index.html")
+        } else {
+            server.config.dir.join(&new_orig[1..])
+        }
+    } else {
+        file_path
+    };
     // --- PATH_INFO extraction (libhttpd.c:2240-2270) ---
     // Find the longest prefix of orig_filename that exists on disk.
     // The remainder is the PATH_INFO. We do this BEFORE the CGI check so
     // that the pathinfo-on-non-CGI 403 check below has the correct path_info.
     // We also update orig_filename to the resolved script path so that
     // dispatch_cgi uses the correct script.
+    //
+    // When vhost is enabled, skip this — vhost and PATH_INFO are mutually
+    // exclusive. The vhost-prepended file_path is the authoritative file.
     {
-        let orig = server.conns[slab_key].http.orig_filename.clone();
-        let mut test_path = orig.clone();
-        let mut extracted_pathinfo = String::new();
-        loop {
-            // Build the on-disk path for this test_path
-            let full_path = if test_path == "/" {
-                server.config.dir.join("index.html")
-            } else {
-                server.config.dir.join(&test_path[1..])
-            };
-            if full_path.exists() {
-                break;
-            }
-            if let Some(last_slash) = test_path.rfind('/') {
-                if last_slash == 0 {
-                    // Can't strip further
+        let vhost_active = server.config.vhost
+            && !server.conns[slab_key].http.vhost_dir.is_empty();
+        if !vhost_active {
+            let orig = server.conns[slab_key].http.orig_filename.clone();
+            let mut test_path = orig.clone();
+            let mut extracted_pathinfo = String::new();
+            loop {
+                // Build the on-disk path for this test_path
+                let full_path = if test_path == "/" {
+                    server.config.dir.join("index.html")
+                } else {
+                    server.config.dir.join(&test_path[1..])
+                };
+                if full_path.exists() {
                     break;
                 }
-                let stripped = &test_path[last_slash + 1..];
-                if extracted_pathinfo.is_empty() {
-                    extracted_pathinfo = format!("/{}", stripped);
+                if let Some(last_slash) = test_path.rfind('/') {
+                    if last_slash == 0 {
+                        // Reached root, no file found
+                        break;
+                    }
+                    let stripped = &test_path[last_slash + 1..];
+                    if extracted_pathinfo.is_empty() {
+                        extracted_pathinfo = format!("/{}", stripped);
+                    } else {
+                        extracted_pathinfo = format!("/{}{}", stripped, extracted_pathinfo);
+                    }
+                    test_path = test_path[..last_slash].to_string();
                 } else {
-                    extracted_pathinfo = format!("/{}{}", stripped, extracted_pathinfo);
+                    break;
                 }
-                test_path = test_path[..last_slash].to_string();
-            } else {
-                break;
             }
-        }
-        if !extracted_pathinfo.is_empty() {
-            server.conns[slab_key].http.path_info = extracted_pathinfo;
-            // Also update orig_filename to the resolved script path so
-            // dispatch_cgi uses the correct script.
-            server.conns[slab_key].http.orig_filename = test_path;
+            if !extracted_pathinfo.is_empty() {
+                server.conns[slab_key].http.path_info = extracted_pathinfo;
+                // Also update orig_filename to the resolved script path so
+                // dispatch_cgi uses the correct script.
+                server.conns[slab_key].http.orig_filename = test_path;
+            }
         }
     }
 

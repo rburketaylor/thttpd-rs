@@ -1875,3 +1875,58 @@ class TestDifferentialSymlinks:
         assert b'test content' in c_resp['body']
         assert b'test content' in rust_resp['body']
         _assert_match(results)
+
+
+# =========================================================================
+# Phase 7: Virtual hosting
+# =========================================================================
+
+class TestDifferentialVhost:
+    """Differential tests for virtual hosting (libhttpd.c:1342-1421 vhost_map).
+
+    When vhost is enabled, requests with `Host: vhost1.example.com` look
+    in `<www>/vhost1.example.com/<path>`.
+    """
+
+    def test_vhost_different_hosts(self, dual_server_process_vhost):
+        """Two different Host headers → two different files.
+        C: Host: vhost1.example.com → www/vhost1.example.com/index.html
+        C: Host: vhost2.example.com → www/vhost2.example.com/data.txt"""
+        c_proc, c_port, rust_proc, rust_port = dual_server_process_vhost
+        # vhost1 request
+        req1 = (
+            b'GET /index.html HTTP/1.0\r\n'
+            b'Host: vhost1.example.com\r\n'
+            b'\r\n'
+        )
+        c1, r1, results1 = dual_compare(c_port, rust_port, req1, "vhost.vhost1")
+        assert c1['status_code'] == 200
+        assert r1['status_code'] == 200
+        assert b'vhost1' in c1['body']
+        assert b'vhost1' in r1['body']
+        # vhost2 request
+        req2 = (
+            b'GET /data.txt HTTP/1.0\r\n'
+            b'Host: vhost2.example.com\r\n'
+            b'\r\n'
+        )
+        c2, r2, results2 = dual_compare(c_port, rust_port, req2, "vhost.vhost2")
+        assert c2['status_code'] == 200
+        assert r2['status_code'] == 200
+        assert b'vhost2 data' in c2['body']
+        assert b'vhost2 data' in r2['body']
+
+    def test_vhost_fallback(self, dual_server_process_vhost):
+        """Host: unknown.example.com → 404 (no matching vhost dir)."""
+        c_proc, c_port, rust_proc, rust_port = dual_server_process_vhost
+        req = (
+            b'GET /index.html HTTP/1.0\r\n'
+            b'Host: unknown.example.com\r\n'
+            b'\r\n'
+        )
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port, req, "vhost.fallback"
+        )
+        # Both should return 404 (no www/unknown.example.com/index.html)
+        assert c_resp['status_code'] == 404
+        assert rust_resp['status_code'] == 404

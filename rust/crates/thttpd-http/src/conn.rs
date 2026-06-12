@@ -32,6 +32,9 @@ pub struct HttpConn {
     /// Matches C's `one_one` flag (libhttpd.c:1965). When true, the request
     /// must include a Host header or the server returns 400.
     pub one_one: bool,
+    /// Set when vhost is enabled and the hostname was used to look up the
+    /// file. Stores the lowercased hostname (matches C's vhost_map logic).
+    pub vhost_dir: String,
 
     // Parsed URL components
     pub encoded_url: String,
@@ -98,6 +101,7 @@ impl HttpConn {
             method: Method::Unknown,
             http_version: String::new(),
             one_one: false,
+            vhost_dir: String::new(),
 
             encoded_url: String::new(),
             decoded_url: String::new(),
@@ -150,6 +154,7 @@ impl HttpConn {
         self.method = Method::Unknown;
         self.http_version.clear();
         self.one_one = false;
+        self.vhost_dir.clear();
         self.encoded_url.clear();
         self.decoded_url.clear();
         self.path_info.clear();

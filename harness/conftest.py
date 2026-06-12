@@ -351,6 +351,46 @@ def c_binary():
 
 
 @pytest.fixture(scope="session")
+def dual_server_process_vhost(c_binary, rust_binary, www_root_session):
+    """Session-scoped: both servers with vhost enabled."""
+    www = www_root_session
+    # Set up vhost subdirectories
+    vhost1 = www / "vhost1.example.com"
+    vhost1.mkdir(exist_ok=True)
+    (vhost1 / "index.html").write_text("<html>vhost1</html>")
+    vhost2 = www / "vhost2.example.com"
+    vhost2.mkdir(exist_ok=True)
+    (vhost2 / "data.txt").write_text("vhost2 data")
+
+    c_port = find_free_port()
+    c_proc = subprocess.Popen(
+        [c_binary, "-p", str(c_port), "-D", "-d", str(www),
+         "-c", "**cgi-bin**", "-v"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    rust_port = find_free_port()
+    rust_proc = subprocess.Popen(
+        [rust_binary, "-p", str(rust_port), "-D", "-d", str(www),
+         "-c", "**cgi-bin**", "--vhost"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    # Wait for both to be ready
+    for port in [c_port, rust_port]:
+        for _ in range(50):
+            try:
+                s = socket.socket()
+                s.settimeout(0.2)
+                s.connect(('127.0.0.1', port))
+                s.close()
+                break
+            except (ConnectionRefusedError, OSError):
+                time.sleep(0.1)
+    yield c_proc, c_port, rust_proc, rust_port
+    c_proc.terminate(); c_proc.wait(timeout=5)
+    rust_proc.terminate(); rust_proc.wait(timeout=5)
+
+
+@pytest.fixture(scope="session")
 def rust_binary():
     """Path to the compiled Rust thttpd binary."""
     binary = os.path.join(os.path.dirname(__file__), "..", "rust", "target", "release", "thttpd")
