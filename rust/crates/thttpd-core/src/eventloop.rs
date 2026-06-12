@@ -175,7 +175,8 @@ fn handle_read(server: &mut Server, slab_key: usize) -> io::Result<()> {
         let slot = &server.conns[slab_key];
         let buf_remaining = READ_BUF_SIZE - slot.http.read_idx;
         if buf_remaining == 0 {
-            let response = build_error_response(400, "Bad Request", "");
+            let user_agent = slot.http.user_agent.clone();
+            let response = build_error_response(400, "Bad Request", "", Some(&user_agent));
             let slot = &mut server.conns[slab_key];
             slot.http.response = response;
             slot.http.response_len = slot.http.response.len();
@@ -229,7 +230,8 @@ fn handle_read(server: &mut Server, slab_key: usize) -> io::Result<()> {
     match result {
         GotRequest::NoRequest => Ok(()),
         GotRequest::BadRequest => {
-            let response = build_error_response(400, "Bad Request", "");
+            let user_agent = server.conns[slab_key].http.user_agent.clone();
+            let response = build_error_response(400, "Bad Request", "", Some(&user_agent));
             let slot = &mut server.conns[slab_key];
             slot.http.response = response;
             slot.http.response_len = slot.http.response.len();
@@ -297,7 +299,8 @@ fn process_request(server: &mut Server, slab_key: usize) {
         };
         if bad_version {
             let v = server.conns[slab_key].http.http_version.clone();
-            let body = error_page(400, "Bad Request", "Your request has bad syntax or is inherently impossible to satisfy.\n", &v);
+            let user_agent = server.conns[slab_key].http.user_agent.clone();
+            let body = error_page(400, "Bad Request", "Your request has bad syntax or is inherently impossible to satisfy.\n", &v, Some(&user_agent));
             let http_ref = &server.conns[slab_key].http;
             let response = build_full_response(http_ref, 400, "Bad Request", "text/html", -1, 0, &[]);
             let full_response = if http_ref.mime_flag {
@@ -324,7 +327,8 @@ fn process_request(server: &mut Server, slab_key: usize) {
             let request_line = String::from_utf8_lossy(&buf[..request_line_end]);
             request_line.split_whitespace().next().unwrap_or("UNKNOWN").to_string()
         };
-        let body = error_page(501, "Not Implemented", "The requested method '%.80s' is not implemented by this server.\n", &method_str);
+        let user_agent = server.conns[slab_key].http.user_agent.clone();
+        let body = error_page(501, "Not Implemented", "The requested method '%.80s' is not implemented by this server.\n", &method_str, Some(&user_agent));
         let http_ref = &server.conns[slab_key].http;
         let response = build_full_response(http_ref, 501, "Not Implemented", "text/html", -1, 0, &[]);
         let full_response = if http_ref.mime_flag {
@@ -423,7 +427,8 @@ fn process_request(server: &mut Server, slab_key: usize) {
     {
         let slot = &server.conns[slab_key];
         if slot.http.encoded_url.len() > MAX_URL_LENGTH {
-            let body = error_page(500, "Internal Error", "There was an unusual problem serving the requested URL '%.80s'.\n", &slot.http.encoded_url);
+            let user_agent = slot.http.user_agent.clone();
+            let body = error_page(500, "Internal Error", "There was an unusual problem serving the requested URL '%.80s'.\n", &slot.http.encoded_url, Some(&user_agent));
             let http_ref = &server.conns[slab_key].http;
             let response = build_full_response(http_ref, 500, "Internal Error", "text/html", -1, 0, &[]);
             let full_response = if http_ref.mime_flag {
@@ -456,7 +461,8 @@ fn process_request(server: &mut Server, slab_key: usize) {
                 } else {
                     (404, "Not Found", "The requested URL '%.80s' was not found on this server.\n")
                 };
-                let body = error_page(status, title, form_msg, decoded);
+                let user_agent = server.conns[slab_key].http.user_agent.clone();
+                let body = error_page(status, title, form_msg, decoded, Some(&user_agent));
                 let http_ref = &server.conns[slab_key].http;
                 let response = build_full_response(http_ref, status, title, "text/html", -1, 0, &[]);
                 let full_response = if http_ref.mime_flag {
@@ -532,7 +538,8 @@ fn serve_static(server: &mut Server, slab_key: usize, file_path: &Path) {
         let canonical_root = match std::fs::canonicalize(&server.config.dir) {
             Ok(p) => p,
             Err(_) => {
-                let body = error_page(500, "Internal Error", "There was an unusual problem serving the requested URL '%.80s'.\n", &server.config.dir.to_string_lossy());
+                let user_agent = server.conns[slab_key].http.user_agent.clone();
+                let body = error_page(500, "Internal Error", "There was an unusual problem serving the requested URL '%.80s'.\n", &server.config.dir.to_string_lossy(), Some(&user_agent));
                 let http_ref = &server.conns[slab_key].http;
                 let response = build_full_response(http_ref, 500, "Internal Error", "text/html", -1, 0, &[]);
                 let full_response = if http_ref.mime_flag { let mut r = response; r.extend_from_slice(&body); r } else { body };
@@ -547,7 +554,8 @@ fn serve_static(server: &mut Server, slab_key: usize, file_path: &Path) {
             Ok(canonical) => {
                 if !canonical.starts_with(&canonical_root) {
                     let url = server.conns[slab_key].http.encoded_url.clone();
-                    let body = error_page(403, "Forbidden", "The requested URL '%.80s' resolves to a file outside the permitted web server directory tree.\n", &url);
+                    let user_agent = server.conns[slab_key].http.user_agent.clone();
+                    let body = error_page(403, "Forbidden", "The requested URL '%.80s' resolves to a file outside the permitted web server directory tree.\n", &url, Some(&user_agent));
                     let http_ref = &server.conns[slab_key].http;
                     let response = build_full_response(http_ref, 403, "Forbidden", "text/html", -1, 0, &[]);
                     let full_response = if http_ref.mime_flag { let mut r = response; r.extend_from_slice(&body); r } else { body };
@@ -589,7 +597,8 @@ fn serve_static(server: &mut Server, slab_key: usize, file_path: &Path) {
             } else {
                 "The requested URL '%.80s' is not accessible.\n"
             };
-            let body = error_page(status, title, form_msg, &url);
+            let user_agent = server.conns[slab_key].http.user_agent.clone();
+            let body = error_page(status, title, form_msg, &url, Some(&user_agent));
             let http_ref = &server.conns[slab_key].http;
             let response = build_full_response(http_ref, status, title, "text/html", -1, 0, &[]);
             let full_response = if http_ref.mime_flag { let mut r = response; r.extend_from_slice(&body); r } else { body };
@@ -624,7 +633,8 @@ fn serve_static(server: &mut Server, slab_key: usize, file_path: &Path) {
             }
             Err(e) => {
                 eprintln!("thttpd: directory listing error: {e}");
-                let body = error_page(500, "Internal Error", "There was an unusual problem serving the requested URL '%.80s'.\n", &file_path.to_string_lossy());
+                let user_agent = server.conns[slab_key].http.user_agent.clone();
+                let body = error_page(500, "Internal Error", "There was an unusual problem serving the requested URL '%.80s'.\n", &file_path.to_string_lossy(), Some(&user_agent));
                 let http_ref = &server.conns[slab_key].http;
                 let response = build_full_response(http_ref, 500, "Internal Error", "text/html", -1, 0, &[]);
                 let full_response = if http_ref.mime_flag { let mut r = response; r.extend_from_slice(&body); r } else { body };
@@ -644,7 +654,8 @@ fn serve_static(server: &mut Server, slab_key: usize, file_path: &Path) {
         let mode = metadata.permissions().mode();
         if (mode & 0o004) == 0 {
             let url = server.conns[slab_key].http.encoded_url.clone();
-            let body = error_page(403, "Forbidden", "The requested URL '%.80s' resolves to a file that is not world-readable.\n", &url);
+            let user_agent = server.conns[slab_key].http.user_agent.clone();
+            let body = error_page(403, "Forbidden", "The requested URL '%.80s' resolves to a file that is not world-readable.\n", &url, Some(&user_agent));
             let http_ref = &server.conns[slab_key].http;
             let response = build_full_response(http_ref, 403, "Forbidden", "text/html", -1, 0, &[]);
             let full_response = if http_ref.mime_flag { let mut r = response; r.extend_from_slice(&body); r } else { body };
@@ -746,7 +757,8 @@ fn serve_static(server: &mut Server, slab_key: usize, file_path: &Path) {
         }
         Err(_) => {
             let url = server.conns[slab_key].http.encoded_url.clone();
-            let body = error_page(404, "Not Found", "The requested URL '%.80s' was not found on this server.\n", &url);
+            let user_agent = server.conns[slab_key].http.user_agent.clone();
+            let body = error_page(404, "Not Found", "The requested URL '%.80s' was not found on this server.\n", &url, Some(&user_agent));
             let http_ref = &server.conns[slab_key].http;
             let response = build_full_response(http_ref, 404, "Not Found", "text/html", -1, 0, &[]);
             let full_response = if http_ref.mime_flag { let mut r = response; r.extend_from_slice(&body); r } else { body };
@@ -820,7 +832,8 @@ fn dispatch_cgi(server: &mut Server, slab_key: usize, _script_path: &Path) {
     // --- CGI not-found check ---
     if !resolved_path.exists() || resolved_path.is_dir() {
         let url = server.conns[slab_key].http.encoded_url.clone();
-        let body = error_page(404, "Not Found", "The requested URL '%.80s' was not found on this server.\n", &url);
+        let user_agent = server.conns[slab_key].http.user_agent.clone();
+        let body = error_page(404, "Not Found", "The requested URL '%.80s' was not found on this server.\n", &url, Some(&user_agent));
         let http_ref = &server.conns[slab_key].http;
         let response = build_full_response(http_ref, 404, "Not Found", "text/html", -1, 0, &[]);
         let full_response = if http_ref.mime_flag { let mut r = response; r.extend_from_slice(&body); r } else { body };
@@ -929,7 +942,8 @@ fn dispatch_cgi(server: &mut Server, slab_key: usize, _script_path: &Path) {
         Err(e) => {
             eprintln!("thttpd: CGI error: {e}");
             let url = server.conns[slab_key].http.encoded_url.clone();
-            let body = error_page(500, "Internal Error", "There was an unusual problem serving the requested URL '%.80s'.\n", &url);
+            let user_agent = server.conns[slab_key].http.user_agent.clone();
+            let body = error_page(500, "Internal Error", "There was an unusual problem serving the requested URL '%.80s'.\n", &url, Some(&user_agent));
             let http_ref = &server.conns[slab_key].http;
             let response = build_full_response(http_ref, 500, "Internal Error", "text/html", -1, 0, &[]);
             let full_response = if http_ref.mime_flag { let mut r = response; r.extend_from_slice(&body); r } else { body };
@@ -1122,11 +1136,11 @@ fn close_connection(server: &mut Server, slab_key: usize) {
 }
 
 /// Build a complete HTTP error response.
-fn build_error_response(status_code: u16, status_text: &str, extra: &str) -> Vec<u8> {
+fn build_error_response(status_code: u16, status_text: &str, extra: &str, user_agent: Option<&str>) -> Vec<u8> {
     // For 400 errors, extra is used as arg (empty string)
     // The form is the generic bad-request message
     let form = "Your request has bad syntax or is inherently impossible to satisfy.\n";
-    let body = error_page(status_code, status_text, form, extra);
+    let body = error_page(status_code, status_text, form, extra, user_agent);
     ResponseBuilder::new()
         .status(status_code, status_text)
         .header("Content-Type", "text/html")

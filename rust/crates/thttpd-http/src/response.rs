@@ -171,7 +171,9 @@ fn defang(s: &str) -> String {
 
 /// Generate an HTML error page matching C's `send_response()` format exactly.
 /// `form` is the error-specific message (may contain `%.80s` placeholder for `arg`).
-pub fn error_page(status: u16, title: &str, form: &str, arg: &str) -> Vec<u8> {
+/// `user_agent` triggers MSIE padding if it contains the substring "MSIE"
+/// (matching C's `match("**MSIE**", hc->useragent)` at libhttpd.c:742-749).
+pub fn error_page(status: u16, title: &str, form: &str, arg: &str, user_agent: Option<&str>) -> Vec<u8> {
     let defanged = defang(arg);
 
     let body_message = if form.contains("%.80s") {
@@ -181,10 +183,32 @@ pub fn error_page(status: u16, title: &str, form: &str, arg: &str) -> Vec<u8> {
         form.to_string()
     };
 
-    format!(
-        "<HTML>\n<HEAD><TITLE>{} {}</TITLE></HEAD>\n<BODY BGCOLOR=\"#cc9999\" TEXT=\"#000000\" LINK=\"#2020ff\" VLINK=\"#4040cc\">\n<H2>{} {}</H2>\n{}<HR>\n<ADDRESS><A HREF=\"{}\">{}</A></ADDRESS>\n</BODY>\n</HTML>\n",
-        status, title, status, title, body_message, SERVER_ADDRESS, SERVER_SOFTWARE
-    ).into_bytes()
+    // C's send_response() emits: <HTML>...<H2>form_msg[ + MSIE padding] <HR>...</HTML>
+    // (libhttpd.c:738-751) — padding goes BETWEEN the body message and <HR>,
+    // NOT after </HTML>. Order matters for byte-exact parity.
+    let mut html = format!(
+        "<HTML>\n<HEAD><TITLE>{} {}</TITLE></HEAD>\n<BODY BGCOLOR=\"#cc9999\" TEXT=\"#000000\" LINK=\"#2020ff\" VLINK=\"#4040cc\">\n<H2>{} {}</H2>\n{}",
+        status, title, status, title, body_message
+    );
+
+    // MSIE padding — C appends this for clients identifying as MSIE
+    // (libhttpd.c:742-749). 6 lines of "Padding so that MSIE deigns to show..."
+    // between `<!--` and `-->`.
+    if user_agent.map(|ua| ua.contains("MSIE")).unwrap_or(false) {
+        html.push_str("<!--\n");
+        for _ in 0..6 {
+            html.push_str("Padding so that MSIE deigns to show this error instead of its own canned one.\n");
+        }
+        html.push_str("-->\n");
+    }
+
+    // Then the response tail: <HR>, <ADDRESS>, </BODY>, </HTML>
+    html.push_str(&format!(
+        "<HR>\n<ADDRESS><A HREF=\"{}\">{}</A></ADDRESS>\n</BODY>\n</HTML>\n",
+        SERVER_ADDRESS, SERVER_SOFTWARE
+    ));
+
+    html.into_bytes()
 }
 
 #[cfg(test)]
@@ -223,7 +247,7 @@ mod tests {
 
     #[test]
     fn test_error_page_404() {
-        let html = error_page(404, "Not Found", "The requested URL '%.80s' was not found on this server.\n", "/nonexistent.html");
+        let html = error_page(404, "Not Found", "The requested URL '%.80s' was not found on this server.\n", "/nonexistent.html", None);
         let s = String::from_utf8(html).unwrap();
         assert!(s.contains("<TITLE>404 Not Found</TITLE>"));
         assert!(s.contains("<H2>404 Not Found</H2>"));
@@ -231,6 +255,32 @@ mod tests {
         assert!(s.contains("<HR>"));
         assert!(s.contains("<ADDRESS>"));
         assert!(s.contains(SERVER_SOFTWARE));
+        // No MSIE padding when user_agent is None
+        assert!(!s.contains("Padding so that MSIE"));
+    }
+
+    #[test]
+    fn test_error_page_msie_padding() {
+        // MSIE user agent gets the 6-line padding block
+        let html = error_page(404, "Not Found", "not found\n", "x",
+            Some("Mozilla/4.0 (compatible; MSIE 6.0; Windows NT 5.1)"));
+        let s = String::from_utf8(html).unwrap();
+        assert!(s.contains("<!--\n"));
+        assert!(s.contains("-->\n"));
+        let pad_count = s.matches("Padding so that MSIE deigns to show this error").count();
+        assert_eq!(pad_count, 6, "MSIE padding must have exactly 6 lines (matches C's `for (n=0;n<6;n++)`)");
+        // Padding text matches C byte-for-byte
+        assert!(s.contains("Padding so that MSIE deigns to show this error instead of its own canned one.\n"));
+    }
+
+    #[test]
+    fn test_error_page_no_msie_no_padding() {
+        // Non-MSIE user agent does not get padding
+        let html = error_page(404, "Not Found", "not found\n", "x",
+            Some("Mozilla/5.0 (X11; Linux x86_64) Firefox/100.0"));
+        let s = String::from_utf8(html).unwrap();
+        assert!(!s.contains("Padding so that MSIE"));
+        assert!(!s.contains("<!--"));
     }
 
     #[test]
