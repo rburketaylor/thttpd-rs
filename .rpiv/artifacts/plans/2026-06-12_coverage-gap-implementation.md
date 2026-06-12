@@ -29,7 +29,7 @@ If this session is interrupted or context is lost:
 
 | Phase | Description | Tests added | Status |
 |-------|-------------|-------------|--------|
-| 1 | Parser hardening (HTTP/9.9, Crlfcr, case-insensitive method, X-Forwarded-For) | ~4 | TODO |
+| 1 | Parser hardening (HTTP/9.9, Crlfcr, case-insensitive method, X-Forwarded-For) | +14 (11 unit + 3 differential) | **DONE** (commit 5bfec35) |
 | 2 | Auth subsystem (crypt + .htpasswd + differential test) | ~3 | TODO |
 | 3 | Static file serving hardening (non-CGI exe → 403, pathinfo → 403, Range edges) | ~5 | TODO |
 | 4 | CGI depth (Status:, Location:, nph-multistatus, make_envp headers) | ~6 | TODO |
@@ -479,10 +479,13 @@ docs: update for completed coverage gap implementation
 
 ## Progress log (update as you go)
 
-### Phase 1
-- **Started:** 2026-06-12
-- **Status:** TODO
-- **Notes:** (fill in as we go)
+### Phase 1 — DONE (commit 5bfec35, 2026-06-12)
+- **Crlfcr**: Rust now accepts \r and \n as end-of-request in Crlfcr state (was: only \n). Plus 5 other FSM fixes (Cr, Lf, FirstWs, SecondWs, ThirdWs).
+- **HTTP/9.9 + Host**: one_one flag set for non-1.0 versions. Host required. Response status line echoes request version.
+- **X-Forwarded-For**: Header parsed, first IP used as REMOTE_ADDR. Strips '::ffff:' prefix from IPv4-mapped.
+- **Known C bug**: C's XFF parsing is broken on IPv6 sockets (sa_in.sin_addr vs sa_in6 union). Rust correctly honors XFF; C ignores it on IPv6. Test documents the divergence.
+- **Tests added**: 7 FSM unit, 4 XFF unit, 3 differential = 14 total.
+- **Cumulative test count**: 219 → 233.
 
 ### Phase 2
 - **Started:** (fill in)
