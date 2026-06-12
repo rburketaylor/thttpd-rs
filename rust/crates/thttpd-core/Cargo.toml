@@ -24,3 +24,4 @@ signal-hook-mio = { workspace = true }
 nix = { workspace = true }
 slab = { workspace = true }
 hostname = "0.4"
+tempfile = "3"

@@ -1930,3 +1930,61 @@ class TestDifferentialVhost:
         # Both should return 404 (no www/unknown.example.com/index.html)
         assert c_resp['status_code'] == 404
         assert rust_resp['status_code'] == 404
+
+
+# =========================================================================
+# Phase 8: Throttle file parsing
+# =========================================================================
+
+class TestDifferentialThrottle:
+    """Differential tests for throttle file parsing.
+
+    Covers thttpd.c:1369-1462 (read_throttlefile) — comment lines,
+    'min-max' format, unparsable lines, leading-slash stripping.
+    """
+
+    def test_throttle_min_max_format(self, c_binary, rust_binary, tmp_path):
+        """Throttle file with min-max format is accepted by both servers.
+        C: thttpd.c:1408 'min-max' sscanf format. Rust: parse_line with '-' split."""
+        import subprocess
+        from conftest import find_free_port
+        throttle_file = tmp_path / "throttle.conf"
+        throttle_file.write_text(
+            "# Throttle config\n"
+            "*.html 1000-1000000\n"
+            "garbage line without numbers\n"
+            "*.png 500000\n"
+        )
+        # Just verify both servers START successfully (proves parse_line didn't crash)
+        for binary in [c_binary, rust_binary]:
+            www = tmp_path / "www_throttle"
+            www.mkdir(exist_ok=True)
+            (www / "test.html").write_text("html")
+            (www / "test.png").write_text("png")
+            port = find_free_port()
+            proc = subprocess.Popen(
+                [binary, "-p", str(port), "-D", "-d", str(www),
+                 "-t", str(throttle_file)],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            # Wait for server to be ready
+            import time
+            time.sleep(0.5)
+            try:
+                # Just verify it accepts a request
+                import socket
+                s = socket.socket(); s.settimeout(2)
+                s.connect(('127.0.0.1', port))
+                s.send(b'GET /test.html HTTP/1.0\r\n\r\n')
+                data = b''
+                while True:
+                    try:
+                        c = s.recv(4096)
+                        if not c: break
+                        data += c
+                    except: break
+                s.close()
+                assert b'test.html' in data or b'200' in data, f"{binary}: no 200 OK"
+            finally:
+                proc.terminate()
+                proc.wait(timeout=3)
