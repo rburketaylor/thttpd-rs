@@ -37,7 +37,7 @@ cargo build --workspace
 # Release build (for testing against C binary)
 cargo build --release
 
-# Run all unit tests (58 tests)
+# Run all unit tests (91 tests)
 cargo test --workspace
 ```
 

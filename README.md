@@ -16,8 +16,8 @@ The answer is **yes**. Every test passes:
 |---|---|
 | Differential tests (C vs Rust) | **81 / 81** |
 | C-only harness tests | **80 / 80** |
-| Rust unit tests | **58 / 58** |
-| **Total** | **219 / 219** |
+| Rust unit tests | **91 / 91** |
+| **Total** | **276 / 276** |
 
 ---
 
@@ -160,7 +160,7 @@ bash pipeline/build_legacy.sh
 ### Run all tests
 
 ```bash
-# Rust unit tests (58 tests)
+# Rust unit tests (91 tests)
 cargo test --manifest-path rust/Cargo.toml --workspace
 
 # C-only harness tests (80 tests)
@@ -184,10 +184,10 @@ python3 pipeline/validate_knowledge.py
 | Modules | 7 + headers | 8 crates |
 | Differential tests | — | 81 (8 categories) |
 | Harness tests | — | 80 (C-only, same 8 categories) |
-| Unit tests | — | 58 |
+| Unit tests | — | 91 |
 | External dependencies | libc | mio, nix, clap, memmap2, thiserror, signal-hook, slab |
 
-The Rust implementation is ~4× more compact despite adding full type safety, comprehensive error handling, and 58 unit tests. The `libhttpd.c` → `thttpd-http` translation compresses 4,230 lines of C into 995 lines of Rust — a 4.3× reduction.
+The Rust implementation is ~4× more compact despite adding full type safety, comprehensive error handling, and 91 unit tests. The `libhttpd.c` → `thttpd-http` translation compresses 4,230 lines of C into 995 lines of Rust — a 4.3× reduction.
 
 ---
 
@@ -197,7 +197,7 @@ The port was done in phases with automated gates:
 
 1. **Foundation** — Repo setup, Cargo workspace, knowledge graph of every C module
 2. **Analysis** — Static analysis of C source, dependency graphs, risk assessment
-3. **Golden Master** — Capture the C binary's exact behavior into 80 test cases
+3. **Golden Master** — Capture the C binary's exact behavior into 105 test cases
 4. **Translation** — C → Rust, module by module, in dependency order (leaves first)
 5. **Verification** — Differential testing loop: run same tests against both binaries, diff every response, fix divergences
 6. **Modernization** — Polish: enums, documentation, error handling
