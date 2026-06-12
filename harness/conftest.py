@@ -189,6 +189,10 @@ def www_root_session(tmp_path_factory):
     (secret / ".htpasswd").write_text("alice:$1$abcd$Oy8OD9LGKv7H9yIMreLNV1\n")
     (secret / ".htpasswd").chmod(0o644)
 
+    # Non-CGI executable file (should be 403 per libhttpd.c:3790-3799)
+    (www / "executable.txt").write_text("I'm executable but not CGI")
+    (www / "executable.txt").chmod(0o755)
+
     return www
 
 

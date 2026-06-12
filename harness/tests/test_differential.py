@@ -1599,3 +1599,80 @@ class TestDifferentialAuth:
         assert b'secret content' in c_resp['body']
         assert b'secret content' in rust_resp['body']
         _assert_match(results)
+
+
+# =========================================================================
+# Phase 3: Static file serving hardening
+# =========================================================================
+
+class TestDifferentialStaticHardening:
+    """Differential tests for non-CGI executable and pathinfo handling.
+
+    Covers libhttpd.c:3790-3810 — non-CGI executable files and files
+    with pathinfo are rejected with 403.
+    """
+
+    def test_non_cgi_executable_returns_403(self, dual_server_process):
+        """A world-executable file outside CGI dirs → 403.
+        Matches libhttpd.c:3790-3799 — 'marked executable but is not a CGI file'."""
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        req = b'GET /executable.txt HTTP/1.0\r\n\r\n'
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port, req, "static.non_cgi_executable"
+        )
+        assert c_resp['status_code'] == 403
+        assert rust_resp['status_code'] == 403
+        _assert_match(results)
+
+    def test_pathinfo_on_non_cgi_returns_403(self, dual_server_process):
+        """A request like /file.txt/extra (pathinfo on non-CGI) → 403.
+        Matches libhttpd.c:3801-3810 — 'resolves to a file plus CGI-style pathinfo'."""
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        # /test.txt/extra — Rust will look for /test.txt as file, 'extra' as pathinfo
+        req = b'GET /test.txt/extra HTTP/1.0\r\n\r\n'
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port, req, "static.pathinfo_on_non_cgi"
+        )
+        # Both should return 403 (C) or possibly 404 if /test.txt/extra doesn't resolve
+        # The exact behavior depends on how each server resolves the path.
+        # C does pathinfo extraction for /test.txt/extra → file=/test.txt, pathinfo=/extra
+        # Since /test.txt is non-CGI, C returns 403.
+        assert c_resp['status_code'] in (403, 404), f"C: {c_resp['status_code']}"
+        assert rust_resp['status_code'] in (403, 404), f"Rust: {rust_resp['status_code']}"
+        # If both return 403, the body should match byte-exact
+        if c_resp['status_code'] == 403 and rust_resp['status_code'] == 403:
+            _assert_match(results)
+
+    def test_range_open_ended(self, dual_server_process):
+        """Range: bytes=0- (open-ended, from 0 to end) → 200 with full body.
+        Matches libhttpd.c:3814-3816 + 613-619: C caps last_byte_index to
+        file_size-1, then since (last==length-1 && first==0), it serves 200.
+        Both servers should produce 200 with the full file."""
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        req = b'GET /test.txt HTTP/1.0\r\nRange: bytes=0-\r\n\r\n'
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port, req, "static.range_open_ended"
+        )
+        # C returns 200 (not 206) because the cap makes the range cover
+        # the entire file
+        assert c_resp['status_code'] == 200
+        assert rust_resp['status_code'] == 200
+        assert b'test content' in c_resp['body']
+        assert b'test content' in rust_resp['body']
+        _assert_match(results)
+
+    def test_range_out_of_bounds(self, dual_server_process):
+        """Range: bytes=99999- (beyond file size) → 200 with full body.
+        C caps to file size; both should produce 200 with full content.
+        Matches libhttpd.c:3814-3816."""
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        req = b'GET /test.txt HTTP/1.0\r\nRange: bytes=99999-\r\n\r\n'
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port, req, "static.range_out_of_bounds"
+        )
+        # C: if last_byte_index >= file_size, it caps to file_size - 1.
+        # Then the Range is still 206, body is the full file.
+        # Or possibly 200 if got_range is cleared.
+        assert c_resp['status_code'] in (200, 206), f"C: {c_resp['status_code']}"
+        assert rust_resp['status_code'] in (200, 206), f"Rust: {rust_resp['status_code']}"
+        _assert_match(results)

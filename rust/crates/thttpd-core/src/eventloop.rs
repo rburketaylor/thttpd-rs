@@ -505,6 +505,50 @@ fn process_request(server: &mut Server, slab_key: usize) {
         path
     };
 
+    // --- PATH_INFO extraction (libhttpd.c:2240-2270) ---
+    // Find the longest prefix of orig_filename that exists on disk.
+    // The remainder is the PATH_INFO. We do this BEFORE the CGI check so
+    // that the pathinfo-on-non-CGI 403 check below has the correct path_info.
+    // We also update orig_filename to the resolved script path so that
+    // dispatch_cgi uses the correct script.
+    {
+        let orig = server.conns[slab_key].http.orig_filename.clone();
+        let mut test_path = orig.clone();
+        let mut extracted_pathinfo = String::new();
+        loop {
+            // Build the on-disk path for this test_path
+            let full_path = if test_path == "/" {
+                server.config.dir.join("index.html")
+            } else {
+                server.config.dir.join(&test_path[1..])
+            };
+            if full_path.exists() {
+                break;
+            }
+            if let Some(last_slash) = test_path.rfind('/') {
+                if last_slash == 0 {
+                    // Can't strip further
+                    break;
+                }
+                let stripped = &test_path[last_slash + 1..];
+                if extracted_pathinfo.is_empty() {
+                    extracted_pathinfo = format!("/{}", stripped);
+                } else {
+                    extracted_pathinfo = format!("/{}{}", stripped, extracted_pathinfo);
+                }
+                test_path = test_path[..last_slash].to_string();
+            } else {
+                break;
+            }
+        }
+        if !extracted_pathinfo.is_empty() {
+            server.conns[slab_key].http.path_info = extracted_pathinfo;
+            // Also update orig_filename to the resolved script path so
+            // dispatch_cgi uses the correct script.
+            server.conns[slab_key].http.orig_filename = test_path;
+        }
+    }
+
     // Check CGI pattern — try progressively shorter prefixes to handle PATH_INFO
     let is_cgi = {
         let slot = &server.conns[slab_key];
@@ -537,6 +581,29 @@ fn process_request(server: &mut Server, slab_key: usize) {
 
     if is_cgi {
         dispatch_cgi(server, slab_key, &file_path);
+        return;
+    }
+
+    // Pathinfo on non-CGI file → 403 (libhttpd.c:3801-3810).
+    // If the pathinfo was extracted by the is_cgi check above, but the
+    // file isn't actually CGI, return 403 here.
+    if !server.conns[slab_key].http.path_info.is_empty() {
+        let url = server.conns[slab_key].http.encoded_url.clone();
+        let user_agent = server.conns[slab_key].http.user_agent.clone();
+        let body = error_page(
+            403,
+            "Forbidden",
+            "The requested URL '%.80s' resolves to a file plus CGI-style pathinfo, but the file is not a valid CGI file.\n",
+            &url,
+            Some(&user_agent),
+        );
+        let http_ref = &server.conns[slab_key].http;
+        let response = build_full_response(http_ref, 403, "Forbidden", "text/html", -1, 0, &[]);
+        let full_response = if http_ref.mime_flag { let mut r = response; r.extend_from_slice(&body); r } else { body };
+        let slot = &mut server.conns[slab_key];
+        slot.http.response = full_response;
+        slot.http.response_len = slot.http.response.len();
+        transition_to_sending(server, slab_key);
         return;
     }
 
@@ -733,6 +800,52 @@ fn serve_static(server: &mut Server, slab_key: usize, file_path: &Path) {
             transition_to_sending(server, slab_key);
             return;
         }
+
+        // Non-CGI executable file → 403 (libhttpd.c:3790-3799).
+        // The CGI check happens in process_request, so we only get here
+        // for non-CGI files. If the file is world-executable but not in
+        // the CGI pattern, C returns 403.
+        if (mode & 0o001) != 0 {
+            let url = server.conns[slab_key].http.encoded_url.clone();
+            let user_agent = server.conns[slab_key].http.user_agent.clone();
+            let body = error_page(
+                403,
+                "Forbidden",
+                "The requested URL '%.80s' resolves to a file which is marked executable but is not a CGI file; retrieving it is forbidden.\n",
+                &url,
+                Some(&user_agent),
+            );
+            let http_ref = &server.conns[slab_key].http;
+            let response = build_full_response(http_ref, 403, "Forbidden", "text/html", -1, 0, &[]);
+            let full_response = if http_ref.mime_flag { let mut r = response; r.extend_from_slice(&body); r } else { body };
+            let slot = &mut server.conns[slab_key];
+            slot.http.response = full_response;
+            slot.http.response_len = slot.http.response.len();
+            transition_to_sending(server, slab_key);
+            return;
+        }
+    }
+
+    // Pathinfo on non-CGI file → 403 (libhttpd.c:3801-3810).
+    // If the request had pathinfo but the file is not CGI, C rejects it.
+    if !server.conns[slab_key].http.path_info.is_empty() {
+        let url = server.conns[slab_key].http.encoded_url.clone();
+        let user_agent = server.conns[slab_key].http.user_agent.clone();
+        let body = error_page(
+            403,
+            "Forbidden",
+            "The requested URL '%.80s' resolves to a file plus CGI-style pathinfo, but the file is not a valid CGI file.\n",
+            &url,
+            Some(&user_agent),
+        );
+        let http_ref = &server.conns[slab_key].http;
+        let response = build_full_response(http_ref, 403, "Forbidden", "text/html", -1, 0, &[]);
+        let full_response = if http_ref.mime_flag { let mut r = response; r.extend_from_slice(&body); r } else { body };
+        let slot = &mut server.conns[slab_key];
+        slot.http.response = full_response;
+        slot.http.response_len = slot.http.response.len();
+        transition_to_sending(server, slab_key);
+        return;
     }
 
     let file_size = metadata.len() as i64;
