@@ -237,6 +237,13 @@ def www_root_session(tmp_path_factory):
     # .zzz — tests application/octet-stream default (xyz is in C's table as chemical/x-xyz)
     (www / "data.zzz").write_text("unknown extension data")
 
+    # Circular symlink (libhttpd.c:1599 — too many symlinks)
+    (www / "loop_a").symlink_to("loop_b")
+    (www / "loop_b").symlink_to("loop_a")
+
+    # Absolute-target symlink (libhttpd.c:1631 — absolute symlink)
+    (www / "abs_link").symlink_to(str(www / "test.txt"))
+
     return www
 
 

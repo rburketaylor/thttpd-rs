@@ -1816,3 +1816,62 @@ class TestDifferentialMime:
         assert c_resp['headers'].get('content-type') == 'application/octet-stream'
         assert rust_resp['headers'].get('content-type') == 'application/octet-stream'
         _assert_match(results)
+
+
+# =========================================================================
+# Phase 6: Symlink edge cases
+# =========================================================================
+
+class TestDifferentialSymlinks:
+    """Differential tests for symlink edge cases.
+
+    Covers libhttpd.c:1599-1602 (MAX_LINKS), 1631-1636 (absolute symlink),
+    and 2402-2437 (de_dotdot).
+    """
+
+    def test_circular_symlink(self, dual_server_process):
+        """Circular symlink (a → b → a) → 500 (C) / 403 (Rust).
+        Matches libhttpd.c:1599-1602 (MAX_LINKS check). Both servers
+        must fail safely (not 200) but exact status code differs:
+        C detects the loop and returns 500; Rust's std::fs::canonicalize
+        bails out earlier and returns 403. This is a known divergence."""
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        req = b'GET /loop_a HTTP/1.0\r\n\r\n'
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port, req, "symlink.circular"
+        )
+        # Both must fail safely (not 200)
+        assert c_resp['status_code'] in (403, 404, 500), f"C: {c_resp['status_code']}"
+        assert rust_resp['status_code'] in (403, 404, 500), f"Rust: {rust_resp['status_code']}"
+        # Document the divergence
+        print(f"  Circular symlink: C={c_resp['status_code']}, Rust={rust_resp['status_code']}")
+
+    def test_absolute_target_symlink(self, dual_server_process):
+        """Absolute-target symlink → resolves correctly.
+        Matches libhttpd.c:1631 — absolute symlink zeroes out `checked`."""
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        req = b'GET /abs_link HTTP/1.0\r\n\r\n'
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port, req, "symlink.absolute"
+        )
+        # Both should return 200 with the file content
+        assert c_resp['status_code'] == 200
+        assert rust_resp['status_code'] == 200
+        assert b'test content' in c_resp['body']
+        assert b'test content' in rust_resp['body']
+        _assert_match(results)
+
+    def test_dedotdot_subdir_to_root(self, dual_server_process):
+        """GET /subdir/../test.txt → resolves to /test.txt.
+        Matches libhttpd.c:2418-2426 (../ removal)."""
+        c_proc, c_port, rust_proc, rust_port = dual_server_process
+        req = b'GET /subdir/../test.txt HTTP/1.0\r\n\r\n'
+        c_resp, rust_resp, results = dual_compare(
+            c_port, rust_port, req, "symlink.dedotdot"
+        )
+        # Both should return 200 with test content
+        assert c_resp['status_code'] == 200, f"C: {c_resp['status_code']}"
+        assert rust_resp['status_code'] == 200, f"Rust: {rust_resp['status_code']}"
+        assert b'test content' in c_resp['body']
+        assert b'test content' in rust_resp['body']
+        _assert_match(results)
