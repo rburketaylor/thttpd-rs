@@ -34,7 +34,7 @@ If this session is interrupted or context is lost:
 | 3 | Static file serving hardening (non-CGI exe → 403, pathinfo → 403, Range edges) | +4 differential | **DONE** (commit e8f3217) |
 | 4 | CGI depth (Status:, Location:, nph-multistatus, make_envp headers) | +5 differential | **DONE** (commit 11f255e) |
 | 5 | MIME / encoding (.tar.gz chained, octet-stream default) | +5 (3 unit + 2 differential) | **DONE** (commit 9152229) |
-| 6 | Symlink edge cases (circular, absolute-target, de_dotdot) | ~3 | TODO |
+| 6 | Symlink edge cases (circular, absolute-target, de_dotdot) | +3 differential | **DONE** (commit 9b57a69) |
 | 7 | Virtual hosting (vhost_map, two Host: headers) | ~2 | TODO |
 | 8 | Throttle file parsing (comment lines, min-max, ThrottleTable::load) | ~3 | TODO |
 | 9 | Config file (-C, --p3p, --maxage, logfile, hostname, etc.) | ~5 | TODO |
@@ -515,3 +515,10 @@ docs: update for completed coverage gap implementation
 - **.tar.gz → gzip + application/x-tar** (was: gz as type, no encoding)
 - **Header order**: Content-Encoding moved before Content-Length to match C
 - **Cumulative test count**: 255 → 260
+
+### Phase 6 — DONE (commit 9b57a69, 2026-06-12)
+- **Symlink tests**: circular (a→b→a), absolute-target, dedotdot
+- **Known divergence**: circular symlink returns 500 in C, 403 in Rust
+  (C detects the loop with MAX_LINKS; Rust's std::fs::canonicalize bails
+  earlier). Both fail safely (not 200). Documented in test.
+- **Cumulative test count**: 260 → 263
