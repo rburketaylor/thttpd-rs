@@ -18,14 +18,14 @@ license = "BSD-2-Clause"
 rust-version = "1.85"
 
 [workspace.dependencies]
-thttpd-core = { path = "crates/thttpd-core" }
-thttpd-http = { path = "crates/thttpd-http" }
-thttpd-fdwatch = { path = "crates/thttpd-fdwatch" }
-thttpd-timers = { path = "crates/thttpd-timers" }
-thttpd-mmc = { path = "crates/thttpd-mmc" }
-thttpd-match = { path = "crates/thttpd-match" }
-thttpd-tdate = { path = "crates/thttpd-tdate" }
-thttpd-mime = { path = "crates/thttpd-mime" }
+thttpd-core = { path = "crates/thttpd-core", version = "0.1.0" }
+thttpd-http = { path = "crates/thttpd-http", version = "0.1.0" }
+thttpd-fdwatch = { path = "crates/thttpd-fdwatch", version = "0.1.0" }
+thttpd-timers = { path = "crates/thttpd-timers", version = "0.1.0" }
+thttpd-mmc = { path = "crates/thttpd-mmc", version = "0.1.0" }
+thttpd-match = { path = "crates/thttpd-match", version = "0.1.0" }
+thttpd-tdate = { path = "crates/thttpd-tdate", version = "0.1.0" }
+thttpd-mime = { path = "crates/thttpd-mime", version = "0.1.0" }
 
 mio = { version = "1", features = ["os-poll", "os-ext", "net"] }
 memmap2 = "0.9"
