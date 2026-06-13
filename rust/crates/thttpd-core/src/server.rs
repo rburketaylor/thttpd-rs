@@ -29,7 +29,10 @@ pub struct Server {
 }
 
 impl Server {
-    pub fn new(config: ServerConfig) -> std::io::Result<Self> {
+    pub fn new(
+        config: ServerConfig,
+        listeners: Vec<thttpd_fdwatch::TcpListener>,
+    ) -> std::io::Result<Self> {
         let poll = Poll::new()?;
         Ok(Self {
             config,
@@ -38,7 +41,7 @@ impl Server {
             mmc: MmapCache::new(),
             stats: ServerStats::default(),
             conns: slab::Slab::new(),
-            listeners: Vec::new(),
+            listeners,
         })
     }
 }

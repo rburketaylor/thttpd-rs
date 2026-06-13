@@ -22,6 +22,7 @@ mio = { workspace = true }
 signal-hook = { workspace = true }
 signal-hook-mio = { workspace = true }
 nix = { workspace = true }
+libc = { workspace = true }
 slab = { workspace = true }
 hostname = "0.4"
 tempfile = "3"

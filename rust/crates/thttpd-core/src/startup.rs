@@ -8,7 +8,11 @@ use std::net::TcpListener as StdTcpListener;
 
 /// Bind listen sockets (IPv4 + optionally IPv6).
 pub fn bind_listeners(config: &ServerConfig) -> std::io::Result<Vec<TcpListener>> {
-    let addr = format!("{}:{}", config.hostname.as_deref().unwrap_or("0.0.0.0"), config.port);
+    let addr = format!(
+        "{}:{}",
+        config.hostname.as_deref().unwrap_or("0.0.0.0"),
+        config.port
+    );
     let std_listener = StdTcpListener::bind(&addr)?;
     std_listener.set_nonblocking(true)?;
     let listener = TcpListener::from_std(std_listener);
@@ -48,14 +52,19 @@ pub fn drop_privileges(config: &ServerConfig) -> Result<(), String> {
             let pwd = nix::unistd::User::from_name(username)
                 .map_err(|e| format!("User::from_name({username}): {e}"))?
                 .ok_or_else(|| format!("user '{username}' not found"))?;
-            nix::unistd::setgid(pwd.gid)
-                .map_err(|e| format!("setgid: {e}"))?;
-            let c_username = CString::new(username.as_str())
-                .map_err(|e| format!("invalid username: {e}"))?;
-            nix::unistd::initgroups(&c_username, pwd.gid)
-                .map_err(|e| format!("initgroups: {e}"))?;
-            nix::unistd::setuid(pwd.uid)
-                .map_err(|e| format!("setuid: {e}"))?;
+            nix::unistd::setgid(pwd.gid).map_err(|e| format!("setgid: {e}"))?;
+            let c_username =
+                CString::new(username.as_str()).map_err(|e| format!("invalid username: {e}"))?;
+            // SAFETY: c_username is a valid NUL-terminated string and gid is
+            // obtained from the system user database. libc returns 0 on success.
+            #[cfg(target_os = "macos")]
+            let raw_gid = pwd.gid.as_raw() as libc::c_int;
+            #[cfg(not(target_os = "macos"))]
+            let raw_gid = pwd.gid.as_raw();
+            if unsafe { libc::initgroups(c_username.as_ptr(), raw_gid) } != 0 {
+                return Err(format!("initgroups: {}", std::io::Error::last_os_error()));
+            }
+            nix::unistd::setuid(pwd.uid).map_err(|e| format!("setuid: {e}"))?;
         }
         #[cfg(not(unix))]
         {
@@ -63,4 +72,13 @@ pub fn drop_privileges(config: &ServerConfig) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Write the configured pidfile after startup has completed successfully.
+pub fn write_pidfile(config: &ServerConfig) -> Result<(), String> {
+    let Some(path) = &config.pidfile else {
+        return Ok(());
+    };
+    std::fs::write(path, format!("{}\n", std::process::id()))
+        .map_err(|error| format!("writing pidfile {}: {error}", path.display()))
 }

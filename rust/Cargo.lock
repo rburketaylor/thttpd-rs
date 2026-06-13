@@ -509,6 +509,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "hostname",
+ "libc",
  "mio",
  "nix",
  "signal-hook",

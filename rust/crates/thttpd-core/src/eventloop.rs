@@ -6,16 +6,16 @@ use crate::connection::ConnSlot;
 use crate::server::Server;
 use std::io::{self, Read, Write};
 use std::path::Path;
-use thttpd_fdwatch::{conn_token, is_listen_token, slab_key_from_token, Events, Interest, Token};
+use std::time::Duration;
+use thttpd_fdwatch::{Events, Interest, Token, conn_token, is_listen_token, slab_key_from_token};
+use thttpd_http::Method;
 use thttpd_http::conn::ConnState;
 use thttpd_http::parse::{got_request, parse_method};
 use thttpd_http::parse_state::GotRequest;
-use thttpd_http::response::{build_full_response, error_page, ResponseBuilder};
-use thttpd_http::Method;
+use thttpd_http::response::{ResponseBuilder, build_full_response, error_page};
 use thttpd_http::url::{normalize_path, percent_decode};
 use thttpd_match::match_pattern;
 use thttpd_mime::figure_mime;
-use std::time::Duration;
 
 /// Maximum number of connections we accept.
 const MAX_CONNECTIONS: usize = 4096;
@@ -28,18 +28,13 @@ const MAX_URL_LENGTH: usize = 10000;
 
 /// Run the main event loop until termination.
 pub fn run(server: &mut Server) -> io::Result<()> {
-    // Bind listen sockets
-    let listeners = crate::startup::bind_listeners(&server.config)?;
-    server.listeners = listeners;
-
     // Register listeners with poll
     for (i, listener) in server.listeners.iter_mut().enumerate() {
         let token = Token(i);
-        server.poll.registry().register(
-            listener,
-            token,
-            Interest::READABLE,
-        )?;
+        server
+            .poll
+            .registry()
+            .register(listener, token, Interest::READABLE)?;
     }
 
     let mut events = Events::with_capacity(1024);
@@ -51,7 +46,10 @@ pub fn run(server: &mut Server) -> io::Result<()> {
         }
 
         // Calculate poll timeout from timer wheel
-        let timeout = server.timers.next_deadline().unwrap_or(Duration::from_secs(60));
+        let timeout = server
+            .timers
+            .next_deadline()
+            .unwrap_or(Duration::from_secs(60));
 
         // Poll for events
         match server.poll.poll(&mut events, Some(timeout)) {
@@ -137,11 +135,11 @@ fn handle_accept(server: &mut Server, listener_idx: usize) -> io::Result<()> {
 
         // Register the stream with mio
         let stream = server.conns[slab_key].stream.as_mut().unwrap();
-        if let Err(e) = server.poll.registry().register(
-            stream,
-            token,
-            Interest::READABLE,
-        ) {
+        if let Err(e) = server
+            .poll
+            .registry()
+            .register(stream, token, Interest::READABLE)
+        {
             eprintln!("thttpd: failed to register connection: {e}");
             server.conns.remove(slab_key);
             continue;
@@ -225,7 +223,12 @@ fn handle_read(server: &mut Server, slab_key: usize) -> io::Result<()> {
     // Run the request-detection FSM
     let (result, new_checked, new_state) = {
         let http = &server.conns[slab_key].http;
-        got_request(&http.read_buf, http.checked_idx, http.read_idx, http.parse_state.clone())
+        got_request(
+            &http.read_buf,
+            http.checked_idx,
+            http.read_idx,
+            http.parse_state,
+        )
     };
 
     {
@@ -268,11 +271,20 @@ fn process_request(server: &mut Server, slab_key: usize) {
         let url = parts.next().unwrap_or("/").to_string();
         let version = parts.next().map(|v| v.to_string());
 
-        let header_start = buf.iter().position(|&b| b == b'\n').map(|p| p + 1).unwrap_or(0);
+        let header_start = buf
+            .iter()
+            .position(|&b| b == b'\n')
+            .map(|p| p + 1)
+            .unwrap_or(0);
         let headers_bytes = &buf[header_start..];
         let host = extract_header(headers_bytes, "Host").unwrap_or_default();
 
-        (url, version.clone().unwrap_or_else(|| "HTTP/0.9".to_string()), host, version.is_some())
+        (
+            url,
+            version.clone().unwrap_or_else(|| "HTTP/0.9".to_string()),
+            host,
+            version.is_some(),
+        )
     };
 
     // Parse method
@@ -288,9 +300,8 @@ fn process_request(server: &mut Server, slab_key: usize) {
         slot.http.http_version = version_str.clone();
         // C: if protocol is not "HTTP/1.0" (case-insensitive), set one_one=1
         // (libhttpd.c:1965). one_one requires a Host header.
-        slot.http.one_one = has_version
-            && !version_str.is_empty()
-            && !version_str.eq_ignore_ascii_case("HTTP/1.0");
+        slot.http.one_one =
+            has_version && !version_str.is_empty() && !version_str.eq_ignore_ascii_case("HTTP/1.0");
         slot.http.encoded_url = url_str.clone();
         slot.http.host = host_str;
         slot.http.mime_flag = has_version; // HTTP/0.9 when no version token
@@ -305,12 +316,16 @@ fn process_request(server: &mut Server, slab_key: usize) {
 
     // one_one requires Host header (libhttpd.c:2250-2255). C returns 400 if
     // one_one is set but no Host header was provided.
-    if server.conns[slab_key].http.one_one
-        && server.conns[slab_key].http.host.is_empty()
-    {
+    if server.conns[slab_key].http.one_one && server.conns[slab_key].http.host.is_empty() {
         let user_agent = server.conns[slab_key].http.user_agent.clone();
         let v = server.conns[slab_key].http.http_version.clone();
-        let body = error_page(400, "Bad Request", "Your request has bad syntax or is inherently impossible to satisfy.\n", &v, Some(&user_agent));
+        let body = error_page(
+            400,
+            "Bad Request",
+            "Your request has bad syntax or is inherently impossible to satisfy.\n",
+            &v,
+            Some(&user_agent),
+        );
         let http_ref = &server.conns[slab_key].http;
         let response = build_full_response(http_ref, 400, "Bad Request", "text/html", -1, 0, &[]);
         let full_response = if http_ref.mime_flag {
@@ -335,12 +350,23 @@ fn process_request(server: &mut Server, slab_key: usize) {
             let buf = &slot.http.read_buf[..slot.http.checked_idx];
             let request_line_end = buf.iter().position(|&b| b == b'\r').unwrap_or(buf.len());
             let request_line = String::from_utf8_lossy(&buf[..request_line_end]);
-            request_line.split_whitespace().next().unwrap_or("UNKNOWN").to_string()
+            request_line
+                .split_whitespace()
+                .next()
+                .unwrap_or("UNKNOWN")
+                .to_string()
         };
         let user_agent = server.conns[slab_key].http.user_agent.clone();
-        let body = error_page(501, "Not Implemented", "The requested method '%.80s' is not implemented by this server.\n", &method_str, Some(&user_agent));
+        let body = error_page(
+            501,
+            "Not Implemented",
+            "The requested method '%.80s' is not implemented by this server.\n",
+            &method_str,
+            Some(&user_agent),
+        );
         let http_ref = &server.conns[slab_key].http;
-        let response = build_full_response(http_ref, 501, "Not Implemented", "text/html", -1, 0, &[]);
+        let response =
+            build_full_response(http_ref, 501, "Not Implemented", "text/html", -1, 0, &[]);
         let full_response = if http_ref.mime_flag {
             let mut r = response;
             r.extend_from_slice(&body);
@@ -359,7 +385,11 @@ fn process_request(server: &mut Server, slab_key: usize) {
     {
         let slot = &mut server.conns[slab_key];
         let buf = &slot.http.read_buf[..slot.http.checked_idx];
-        let header_start = buf.iter().position(|&b| b == b'\n').map(|p| p + 1).unwrap_or(0);
+        let header_start = buf
+            .iter()
+            .position(|&b| b == b'\n')
+            .map(|p| p + 1)
+            .unwrap_or(0);
         let headers_bytes = &buf[header_start..];
 
         // If-Modified-Since
@@ -381,7 +411,8 @@ fn process_request(server: &mut Server, slab_key: usize) {
                                 if dash_pos + 1 < range_spec.len() {
                                     let rest = &range_spec[dash_pos + 1..];
                                     if let Ok(last) = rest.parse::<i64>() {
-                                        slot.http.last_byte_index = if last < 0 { -1 } else { last };
+                                        slot.http.last_byte_index =
+                                            if last < 0 { -1 } else { last };
                                     }
                                 }
                             }
@@ -453,9 +484,16 @@ fn process_request(server: &mut Server, slab_key: usize) {
         let slot = &server.conns[slab_key];
         if slot.http.encoded_url.len() > MAX_URL_LENGTH {
             let user_agent = slot.http.user_agent.clone();
-            let body = error_page(500, "Internal Error", "There was an unusual problem serving the requested URL '%.80s'.\n", &slot.http.encoded_url, Some(&user_agent));
+            let body = error_page(
+                500,
+                "Internal Error",
+                "There was an unusual problem serving the requested URL '%.80s'.\n",
+                &slot.http.encoded_url,
+                Some(&user_agent),
+            );
             let http_ref = &server.conns[slab_key].http;
-            let response = build_full_response(http_ref, 500, "Internal Error", "text/html", -1, 0, &[]);
+            let response =
+                build_full_response(http_ref, 500, "Internal Error", "text/html", -1, 0, &[]);
             let full_response = if http_ref.mime_flag {
                 let mut r = response;
                 r.extend_from_slice(&body);
@@ -482,14 +520,23 @@ fn process_request(server: &mut Server, slab_key: usize) {
                 // normalize_path returns None for directory traversal (..)
                 // Check for // separately (returns 400 Bad Request)
                 let (status, title, form_msg) = if decoded.contains("//") {
-                    (400, "Bad Request", "Your request has bad syntax or is inherently impossible to satisfy.\n")
+                    (
+                        400,
+                        "Bad Request",
+                        "Your request has bad syntax or is inherently impossible to satisfy.\n",
+                    )
                 } else {
-                    (404, "Not Found", "The requested URL '%.80s' was not found on this server.\n")
+                    (
+                        404,
+                        "Not Found",
+                        "The requested URL '%.80s' was not found on this server.\n",
+                    )
                 };
                 let user_agent = server.conns[slab_key].http.user_agent.clone();
                 let body = error_page(status, title, form_msg, decoded, Some(&user_agent));
                 let http_ref = &server.conns[slab_key].http;
-                let response = build_full_response(http_ref, status, title, "text/html", -1, 0, &[]);
+                let response =
+                    build_full_response(http_ref, status, title, "text/html", -1, 0, &[]);
                 let full_response = if http_ref.mime_flag {
                     let mut r = response;
                     r.extend_from_slice(&body);
@@ -521,12 +568,8 @@ fn process_request(server: &mut Server, slab_key: usize) {
     // If vhost is enabled, prepend the hostname (lowercased) to orig_filename
     // AND re-derive file_path. This is a simple port that doesn't include
     // C's VHOST_DIRLEVELS subdirectory split (off by default).
-    let file_path = if server.config.vhost
-        && !server.conns[slab_key].http.host.is_empty()
-    {
-        let host_lower: String = server.conns[slab_key]
-            .http.host
-            .to_lowercase();
+    let file_path = if server.config.vhost && !server.conns[slab_key].http.host.is_empty() {
+        let host_lower: String = server.conns[slab_key].http.host.to_lowercase();
         let hostdir = host_lower;
         let new_orig = format!("/{}{}", hostdir, server.conns[slab_key].http.orig_filename);
         let slot = &mut server.conns[slab_key];
@@ -551,8 +594,7 @@ fn process_request(server: &mut Server, slab_key: usize) {
     // When vhost is enabled, skip this — vhost and PATH_INFO are mutually
     // exclusive. The vhost-prepended file_path is the authoritative file.
     {
-        let vhost_active = server.config.vhost
-            && !server.conns[slab_key].http.vhost_dir.is_empty();
+        let vhost_active = server.config.vhost && !server.conns[slab_key].http.vhost_dir.is_empty();
         if !vhost_active {
             let orig = server.conns[slab_key].http.orig_filename.clone();
             let mut test_path = orig.clone();
@@ -642,7 +684,13 @@ fn process_request(server: &mut Server, slab_key: usize) {
         );
         let http_ref = &server.conns[slab_key].http;
         let response = build_full_response(http_ref, 403, "Forbidden", "text/html", -1, 0, &[]);
-        let full_response = if http_ref.mime_flag { let mut r = response; r.extend_from_slice(&body); r } else { body };
+        let full_response = if http_ref.mime_flag {
+            let mut r = response;
+            r.extend_from_slice(&body);
+            r
+        } else {
+            body
+        };
         let slot = &mut server.conns[slab_key];
         slot.http.response = full_response;
         slot.http.response_len = slot.http.response.len();
@@ -666,10 +714,23 @@ fn serve_static(server: &mut Server, slab_key: usize, file_path: &Path) {
             Ok(p) => p,
             Err(_) => {
                 let user_agent = server.conns[slab_key].http.user_agent.clone();
-                let body = error_page(500, "Internal Error", "There was an unusual problem serving the requested URL '%.80s'.\n", &server.config.dir.to_string_lossy(), Some(&user_agent));
+                let body = error_page(
+                    500,
+                    "Internal Error",
+                    "There was an unusual problem serving the requested URL '%.80s'.\n",
+                    &server.config.dir.to_string_lossy(),
+                    Some(&user_agent),
+                );
                 let http_ref = &server.conns[slab_key].http;
-                let response = build_full_response(http_ref, 500, "Internal Error", "text/html", -1, 0, &[]);
-                let full_response = if http_ref.mime_flag { let mut r = response; r.extend_from_slice(&body); r } else { body };
+                let response =
+                    build_full_response(http_ref, 500, "Internal Error", "text/html", -1, 0, &[]);
+                let full_response = if http_ref.mime_flag {
+                    let mut r = response;
+                    r.extend_from_slice(&body);
+                    r
+                } else {
+                    body
+                };
                 let slot = &mut server.conns[slab_key];
                 slot.http.response = full_response;
                 slot.http.response_len = slot.http.response.len();
@@ -682,10 +743,23 @@ fn serve_static(server: &mut Server, slab_key: usize, file_path: &Path) {
                 if !canonical.starts_with(&canonical_root) {
                     let url = server.conns[slab_key].http.encoded_url.clone();
                     let user_agent = server.conns[slab_key].http.user_agent.clone();
-                    let body = error_page(403, "Forbidden", "The requested URL '%.80s' resolves to a file outside the permitted web server directory tree.\n", &url, Some(&user_agent));
+                    let body = error_page(
+                        403,
+                        "Forbidden",
+                        "The requested URL '%.80s' resolves to a file outside the permitted web server directory tree.\n",
+                        &url,
+                        Some(&user_agent),
+                    );
                     let http_ref = &server.conns[slab_key].http;
-                    let response = build_full_response(http_ref, 403, "Forbidden", "text/html", -1, 0, &[]);
-                    let full_response = if http_ref.mime_flag { let mut r = response; r.extend_from_slice(&body); r } else { body };
+                    let response =
+                        build_full_response(http_ref, 403, "Forbidden", "text/html", -1, 0, &[]);
+                    let full_response = if http_ref.mime_flag {
+                        let mut r = response;
+                        r.extend_from_slice(&body);
+                        r
+                    } else {
+                        body
+                    };
                     let slot = &mut server.conns[slab_key];
                     slot.http.response = full_response;
                     slot.http.response_len = slot.http.response.len();
@@ -694,7 +768,7 @@ fn serve_static(server: &mut Server, slab_key: usize, file_path: &Path) {
                 }
                 canonical
             }
-            Err(_) => file_path.to_path_buf()
+            Err(_) => file_path.to_path_buf(),
         }
     };
 
@@ -728,7 +802,13 @@ fn serve_static(server: &mut Server, slab_key: usize, file_path: &Path) {
             let body = error_page(status, title, form_msg, &url, Some(&user_agent));
             let http_ref = &server.conns[slab_key].http;
             let response = build_full_response(http_ref, status, title, "text/html", -1, 0, &[]);
-            let full_response = if http_ref.mime_flag { let mut r = response; r.extend_from_slice(&body); r } else { body };
+            let full_response = if http_ref.mime_flag {
+                let mut r = response;
+                r.extend_from_slice(&body);
+                r
+            } else {
+                body
+            };
             let slot = &mut server.conns[slab_key];
             slot.http.response = full_response;
             slot.http.response_len = slot.http.response.len();
@@ -743,7 +823,10 @@ fn serve_static(server: &mut Server, slab_key: usize, file_path: &Path) {
     {
         let (authorization, encoded_url) = {
             let slot = &server.conns[slab_key];
-            (slot.http.authorization.clone(), slot.http.encoded_url.clone())
+            (
+                slot.http.authorization.clone(),
+                slot.http.encoded_url.clone(),
+            )
         };
         match thttpd_http::auth::auth_check2(&file_path, &authorization) {
             thttpd_http::auth::AuthResult::NoAuthFile | thttpd_http::auth::AuthResult::Ok => {
@@ -773,8 +856,13 @@ fn serve_static(server: &mut Server, slab_key: usize, file_path: &Path) {
                 )];
                 let http_ref = &server.conns[slab_key].http;
                 let response = build_full_response(
-                    http_ref, 401, thttpd_http::auth::ERR_401_TITLE,
-                    "text/html", -1, 0, &extra_headers,
+                    http_ref,
+                    401,
+                    thttpd_http::auth::ERR_401_TITLE,
+                    "text/html",
+                    -1,
+                    0,
+                    &extra_headers,
                 );
                 let full_response = if http_ref.mime_flag {
                     let mut r = response;
@@ -796,7 +884,8 @@ fn serve_static(server: &mut Server, slab_key: usize, file_path: &Path) {
     if metadata.is_dir() {
         let url_path = server.conns[slab_key].http.orig_filename.clone();
         let dir = file_path.to_path_buf();
-        let mtime = metadata.modified()
+        let mtime = metadata
+            .modified()
             .ok()
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| d.as_secs() as i64)
@@ -805,8 +894,15 @@ fn serve_static(server: &mut Server, slab_key: usize, file_path: &Path) {
         match thttpd_http::dirlist::generate_listing(&dir, &url_path) {
             Ok(body) => {
                 let http_ref = &server.conns[slab_key].http;
-                let response = build_full_response(http_ref, 200, "OK", "text/html", -1, mtime, &[]);
-                let full_response = if http_ref.mime_flag { let mut r = response; r.extend_from_slice(&body); r } else { body };
+                let response =
+                    build_full_response(http_ref, 200, "OK", "text/html", -1, mtime, &[]);
+                let full_response = if http_ref.mime_flag {
+                    let mut r = response;
+                    r.extend_from_slice(&body);
+                    r
+                } else {
+                    body
+                };
                 let slot = &mut server.conns[slab_key];
                 slot.http.response = full_response;
                 slot.http.response_len = slot.http.response.len();
@@ -816,10 +912,23 @@ fn serve_static(server: &mut Server, slab_key: usize, file_path: &Path) {
             Err(e) => {
                 eprintln!("thttpd: directory listing error: {e}");
                 let user_agent = server.conns[slab_key].http.user_agent.clone();
-                let body = error_page(500, "Internal Error", "There was an unusual problem serving the requested URL '%.80s'.\n", &file_path.to_string_lossy(), Some(&user_agent));
+                let body = error_page(
+                    500,
+                    "Internal Error",
+                    "There was an unusual problem serving the requested URL '%.80s'.\n",
+                    &file_path.to_string_lossy(),
+                    Some(&user_agent),
+                );
                 let http_ref = &server.conns[slab_key].http;
-                let response = build_full_response(http_ref, 500, "Internal Error", "text/html", -1, 0, &[]);
-                let full_response = if http_ref.mime_flag { let mut r = response; r.extend_from_slice(&body); r } else { body };
+                let response =
+                    build_full_response(http_ref, 500, "Internal Error", "text/html", -1, 0, &[]);
+                let full_response = if http_ref.mime_flag {
+                    let mut r = response;
+                    r.extend_from_slice(&body);
+                    r
+                } else {
+                    body
+                };
                 let slot = &mut server.conns[slab_key];
                 slot.http.response = full_response;
                 slot.http.response_len = slot.http.response.len();
@@ -837,10 +946,22 @@ fn serve_static(server: &mut Server, slab_key: usize, file_path: &Path) {
         if (mode & 0o004) == 0 {
             let url = server.conns[slab_key].http.encoded_url.clone();
             let user_agent = server.conns[slab_key].http.user_agent.clone();
-            let body = error_page(403, "Forbidden", "The requested URL '%.80s' resolves to a file that is not world-readable.\n", &url, Some(&user_agent));
+            let body = error_page(
+                403,
+                "Forbidden",
+                "The requested URL '%.80s' resolves to a file that is not world-readable.\n",
+                &url,
+                Some(&user_agent),
+            );
             let http_ref = &server.conns[slab_key].http;
             let response = build_full_response(http_ref, 403, "Forbidden", "text/html", -1, 0, &[]);
-            let full_response = if http_ref.mime_flag { let mut r = response; r.extend_from_slice(&body); r } else { body };
+            let full_response = if http_ref.mime_flag {
+                let mut r = response;
+                r.extend_from_slice(&body);
+                r
+            } else {
+                body
+            };
             let slot = &mut server.conns[slab_key];
             slot.http.response = full_response;
             slot.http.response_len = slot.http.response.len();
@@ -864,7 +985,13 @@ fn serve_static(server: &mut Server, slab_key: usize, file_path: &Path) {
             );
             let http_ref = &server.conns[slab_key].http;
             let response = build_full_response(http_ref, 403, "Forbidden", "text/html", -1, 0, &[]);
-            let full_response = if http_ref.mime_flag { let mut r = response; r.extend_from_slice(&body); r } else { body };
+            let full_response = if http_ref.mime_flag {
+                let mut r = response;
+                r.extend_from_slice(&body);
+                r
+            } else {
+                body
+            };
             let slot = &mut server.conns[slab_key];
             slot.http.response = full_response;
             slot.http.response_len = slot.http.response.len();
@@ -887,7 +1014,13 @@ fn serve_static(server: &mut Server, slab_key: usize, file_path: &Path) {
         );
         let http_ref = &server.conns[slab_key].http;
         let response = build_full_response(http_ref, 403, "Forbidden", "text/html", -1, 0, &[]);
-        let full_response = if http_ref.mime_flag { let mut r = response; r.extend_from_slice(&body); r } else { body };
+        let full_response = if http_ref.mime_flag {
+            let mut r = response;
+            r.extend_from_slice(&body);
+            r
+        } else {
+            body
+        };
         let slot = &mut server.conns[slab_key];
         slot.http.response = full_response;
         slot.http.response_len = slot.http.response.len();
@@ -896,7 +1029,8 @@ fn serve_static(server: &mut Server, slab_key: usize, file_path: &Path) {
     }
 
     let file_size = metadata.len() as i64;
-    let file_mtime = metadata.modified()
+    let file_mtime = metadata
+        .modified()
         .ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs() as i64)
@@ -905,10 +1039,10 @@ fn serve_static(server: &mut Server, slab_key: usize, file_path: &Path) {
     // Fill in last_byte_index if needed
     {
         let slot = &mut server.conns[slab_key];
-        if slot.http.got_range {
-            if slot.http.last_byte_index == -1 || slot.http.last_byte_index >= file_size {
-                slot.http.last_byte_index = file_size - 1;
-            }
+        if slot.http.got_range
+            && (slot.http.last_byte_index == -1 || slot.http.last_byte_index >= file_size)
+        {
+            slot.http.last_byte_index = file_size - 1;
         }
     }
 
@@ -925,8 +1059,20 @@ fn serve_static(server: &mut Server, slab_key: usize, file_path: &Path) {
         } else {
             Vec::new()
         };
-        let response = build_full_response(http_ref, 200, "OK", content_type, file_size, file_mtime, &extra_headers);
-        let full_response = if http_ref.mime_flag { response } else { Vec::new() };
+        let response = build_full_response(
+            http_ref,
+            200,
+            "OK",
+            content_type,
+            file_size,
+            file_mtime,
+            &extra_headers,
+        );
+        let full_response = if http_ref.mime_flag {
+            response
+        } else {
+            Vec::new()
+        };
         let slot = &mut server.conns[slab_key];
         slot.http.response = full_response;
         slot.http.response_len = slot.http.response.len();
@@ -947,8 +1093,20 @@ fn serve_static(server: &mut Server, slab_key: usize, file_path: &Path) {
             } else {
                 Vec::new()
             };
-            let response = build_full_response(http_ref, 304, "Not Modified", content_type, -1, file_mtime, &extra_headers);
-            let full_response = if http_ref.mime_flag { response } else { Vec::new() };
+            let response = build_full_response(
+                http_ref,
+                304,
+                "Not Modified",
+                content_type,
+                -1,
+                file_mtime,
+                &extra_headers,
+            );
+            let full_response = if http_ref.mime_flag {
+                response
+            } else {
+                Vec::new()
+            };
             let slot = &mut server.conns[slab_key];
             slot.http.response = full_response;
             slot.http.response_len = slot.http.response.len();
@@ -991,9 +1149,23 @@ fn serve_static(server: &mut Server, slab_key: usize, file_path: &Path) {
             } else {
                 Vec::new()
             };
-            let response = build_full_response(http_ref, 200, "OK", content_type, file_size, file_mtime, &extra_headers);
+            let response = build_full_response(
+                http_ref,
+                200,
+                "OK",
+                content_type,
+                file_size,
+                file_mtime,
+                &extra_headers,
+            );
             let slot = &mut server.conns[slab_key];
-            let full_response = if slot.http.mime_flag { let mut r = response; r.extend_from_slice(&body); r } else { body };
+            let full_response = if slot.http.mime_flag {
+                let mut r = response;
+                r.extend_from_slice(&body);
+                r
+            } else {
+                body
+            };
             slot.http.file_address = Some(mmap);
             slot.http.response = full_response;
             slot.http.response_len = slot.http.response.len();
@@ -1004,10 +1176,22 @@ fn serve_static(server: &mut Server, slab_key: usize, file_path: &Path) {
         Err(_) => {
             let url = server.conns[slab_key].http.encoded_url.clone();
             let user_agent = server.conns[slab_key].http.user_agent.clone();
-            let body = error_page(404, "Not Found", "The requested URL '%.80s' was not found on this server.\n", &url, Some(&user_agent));
+            let body = error_page(
+                404,
+                "Not Found",
+                "The requested URL '%.80s' was not found on this server.\n",
+                &url,
+                Some(&user_agent),
+            );
             let http_ref = &server.conns[slab_key].http;
             let response = build_full_response(http_ref, 404, "Not Found", "text/html", -1, 0, &[]);
-            let full_response = if http_ref.mime_flag { let mut r = response; r.extend_from_slice(&body); r } else { body };
+            let full_response = if http_ref.mime_flag {
+                let mut r = response;
+                r.extend_from_slice(&body);
+                r
+            } else {
+                body
+            };
             let slot = &mut server.conns[slab_key];
             slot.http.response = full_response;
             slot.http.response_len = slot.http.response.len();
@@ -1021,8 +1205,23 @@ fn dispatch_cgi(server: &mut Server, slab_key: usize, _script_path: &Path) {
     // Propagate the configured charset to the connection
     server.conns[slab_key].http.charset = server.config.charset.clone();
 
-    let (method, orig_filename, query, host, peer_addr, content_type, content_length,
-         user_agent, referer, accept, accept_encoding, accept_language, cookie, path_info, x_forwarded_for) = {
+    let (
+        method,
+        orig_filename,
+        query,
+        host,
+        peer_addr,
+        content_type,
+        content_length,
+        user_agent,
+        referer,
+        accept,
+        accept_encoding,
+        accept_language,
+        cookie,
+        path_info,
+        x_forwarded_for,
+    ) = {
         let slot = &server.conns[slab_key];
         (
             slot.http.method.as_str().to_string(),
@@ -1084,10 +1283,22 @@ fn dispatch_cgi(server: &mut Server, slab_key: usize, _script_path: &Path) {
     if !resolved_path.exists() || resolved_path.is_dir() {
         let url = server.conns[slab_key].http.encoded_url.clone();
         let user_agent = server.conns[slab_key].http.user_agent.clone();
-        let body = error_page(404, "Not Found", "The requested URL '%.80s' was not found on this server.\n", &url, Some(&user_agent));
+        let body = error_page(
+            404,
+            "Not Found",
+            "The requested URL '%.80s' was not found on this server.\n",
+            &url,
+            Some(&user_agent),
+        );
         let http_ref = &server.conns[slab_key].http;
         let response = build_full_response(http_ref, 404, "Not Found", "text/html", -1, 0, &[]);
-        let full_response = if http_ref.mime_flag { let mut r = response; r.extend_from_slice(&body); r } else { body };
+        let full_response = if http_ref.mime_flag {
+            let mut r = response;
+            r.extend_from_slice(&body);
+            r
+        } else {
+            body
+        };
         let slot = &mut server.conns[slab_key];
         slot.http.response = full_response;
         slot.http.response_len = slot.http.response.len();
@@ -1097,13 +1308,33 @@ fn dispatch_cgi(server: &mut Server, slab_key: usize, _script_path: &Path) {
 
     // Build HTTP headers map
     let mut http_headers = std::collections::HashMap::new();
-    if !host.is_empty() { http_headers.insert("Host".to_string(), host.rsplit_once(':').map(|(ip, _)| ip).unwrap_or(&host).to_string()); }
-    if !user_agent.is_empty() { http_headers.insert("User-Agent".to_string(), user_agent); }
-    if !referer.is_empty() { http_headers.insert("Referer".to_string(), referer); }
-    if !accept.is_empty() { http_headers.insert("Accept".to_string(), accept); }
-    if !accept_encoding.is_empty() { http_headers.insert("Accept-Encoding".to_string(), accept_encoding); }
-    if !accept_language.is_empty() { http_headers.insert("Accept-Language".to_string(), accept_language); }
-    if !cookie.is_empty() { http_headers.insert("Cookie".to_string(), cookie); }
+    if !host.is_empty() {
+        http_headers.insert(
+            "Host".to_string(),
+            host.rsplit_once(':')
+                .map(|(ip, _)| ip)
+                .unwrap_or(&host)
+                .to_string(),
+        );
+    }
+    if !user_agent.is_empty() {
+        http_headers.insert("User-Agent".to_string(), user_agent);
+    }
+    if !referer.is_empty() {
+        http_headers.insert("Referer".to_string(), referer);
+    }
+    if !accept.is_empty() {
+        http_headers.insert("Accept".to_string(), accept);
+    }
+    if !accept_encoding.is_empty() {
+        http_headers.insert("Accept-Encoding".to_string(), accept_encoding);
+    }
+    if !accept_language.is_empty() {
+        http_headers.insert("Accept-Language".to_string(), accept_language);
+    }
+    if !cookie.is_empty() {
+        http_headers.insert("Cookie".to_string(), cookie);
+    }
 
     // Compute REMOTE_ADDR. C uses httpd_ntoa (libhttpd.c:4063-4085) which:
     //   1. Uses X-Forwarded-For first IP if present (libhttpd.c:2210)
@@ -1128,7 +1359,11 @@ fn dispatch_cgi(server: &mut Server, slab_key: usize, _script_path: &Path) {
             without_port.to_string()
         }
     };
-    let _host_clean = host.rsplit_once(':').map(|(ip, _)| ip).unwrap_or(&host).to_string();
+    let _host_clean = host
+        .rsplit_once(':')
+        .map(|(ip, _)| ip)
+        .unwrap_or(&host)
+        .to_string();
 
     // Get hostname via gethostname()
     let server_name = hostname::get()
@@ -1139,7 +1374,14 @@ fn dispatch_cgi(server: &mut Server, slab_key: usize, _script_path: &Path) {
     let path_translated = if final_path_info.is_empty() {
         None
     } else {
-        Some(server.config.dir.join(&final_path_info[1..]).to_string_lossy().to_string())
+        Some(
+            server
+                .config
+                .dir
+                .join(&final_path_info[1..])
+                .to_string_lossy()
+                .to_string(),
+        )
     };
 
     let cgi_pattern_str = server.config.cgi_pattern.as_deref().unwrap_or("");
@@ -1154,10 +1396,18 @@ fn dispatch_cgi(server: &mut Server, slab_key: usize, _script_path: &Path) {
         script_name: resolved_script.clone(),
         query_string: query,
         remote_addr: remote_addr_clean,
-        content_type: if content_type.is_empty() { None } else { Some(content_type) },
+        content_type: if content_type.is_empty() {
+            None
+        } else {
+            Some(content_type)
+        },
         content_length,
         http_headers,
-        path_info: if final_path_info.is_empty() { None } else { Some(final_path_info) },
+        path_info: if final_path_info.is_empty() {
+            None
+        } else {
+            Some(final_path_info)
+        },
         path_translated,
         remote_user: None,
         auth_type: None,
@@ -1202,7 +1452,9 @@ fn dispatch_cgi(server: &mut Server, slab_key: usize, _script_path: &Path) {
                 // Raw passthrough: build status line + append raw CGI output bytes
                 let (status_code, status_text) = extract_cgi_status(&output);
                 let mut resp = Vec::new();
-                resp.extend_from_slice(format!("HTTP/1.0 {} {}\r\n", status_code, status_text).as_bytes());
+                resp.extend_from_slice(
+                    format!("HTTP/1.0 {} {}\r\n", status_code, status_text).as_bytes(),
+                );
                 resp.extend_from_slice(&output);
                 resp
             };
@@ -1216,10 +1468,23 @@ fn dispatch_cgi(server: &mut Server, slab_key: usize, _script_path: &Path) {
             eprintln!("thttpd: CGI error: {e}");
             let url = server.conns[slab_key].http.encoded_url.clone();
             let user_agent = server.conns[slab_key].http.user_agent.clone();
-            let body = error_page(500, "Internal Error", "There was an unusual problem serving the requested URL '%.80s'.\n", &url, Some(&user_agent));
+            let body = error_page(
+                500,
+                "Internal Error",
+                "There was an unusual problem serving the requested URL '%.80s'.\n",
+                &url,
+                Some(&user_agent),
+            );
             let http_ref = &server.conns[slab_key].http;
-            let response = build_full_response(http_ref, 500, "Internal Error", "text/html", -1, 0, &[]);
-            let full_response = if http_ref.mime_flag { let mut r = response; r.extend_from_slice(&body); r } else { body };
+            let response =
+                build_full_response(http_ref, 500, "Internal Error", "text/html", -1, 0, &[]);
+            let full_response = if http_ref.mime_flag {
+                let mut r = response;
+                r.extend_from_slice(&body);
+                r
+            } else {
+                body
+            };
             let slot = &mut server.conns[slab_key];
             slot.http.response = full_response;
             slot.http.response_len = slot.http.response.len();
@@ -1236,7 +1501,8 @@ fn dispatch_cgi(server: &mut Server, slab_key: usize, _script_path: &Path) {
 ///   3. Else if "Location:" header present, set 302
 ///   4. Map known status codes to their text; unknown → "Something"
 fn extract_cgi_status(output: &[u8]) -> (u16, String) {
-    let blank_pos = output.windows(4)
+    let blank_pos = output
+        .windows(4)
         .position(|w| w == b"\r\n\r\n")
         .or_else(|| output.windows(2).position(|w| w == b"\n\n"));
 
@@ -1257,10 +1523,7 @@ fn extract_cgi_status(output: &[u8]) -> (u16, String) {
             if name.trim().eq_ignore_ascii_case("status") {
                 let value = line[colon_pos + 1..].trim();
                 // C: status = atoi( value ) — takes the leading number
-                let code_str: String = value
-                    .chars()
-                    .take_while(|c| c.is_ascii_digit())
-                    .collect();
+                let code_str: String = value.chars().take_while(|c| c.is_ascii_digit()).collect();
                 if let Ok(code) = code_str.parse::<u16>() {
                     status = code;
                     status_set = true;
@@ -1336,11 +1599,10 @@ fn handle_send(server: &mut Server, slab_key: usize) -> io::Result<()> {
         let token = conn_token(slab_key);
         let slot = &mut server.conns[slab_key];
         if let Some(ref mut stream) = slot.stream {
-            let _ = server.poll.registry().reregister(
-                stream,
-                token,
-                Interest::WRITABLE,
-            );
+            let _ = server
+                .poll
+                .registry()
+                .reregister(stream, token, Interest::WRITABLE);
         }
     }
 
@@ -1384,11 +1646,10 @@ fn transition_to_sending(server: &mut Server, slab_key: usize) {
     slot.http.bytes_sent = 0;
 
     if let Some(ref mut stream) = slot.stream {
-        let _ = server.poll.registry().reregister(
-            stream,
-            token,
-            Interest::WRITABLE,
-        );
+        let _ = server
+            .poll
+            .registry()
+            .reregister(stream, token, Interest::WRITABLE);
     }
 
     server.stats.requests += 1;
@@ -1410,11 +1671,10 @@ fn transition_to_lingering(server: &mut Server, slab_key: usize) {
     }
 
     if let Some(ref mut stream) = slot.stream {
-        let _ = server.poll.registry().reregister(
-            stream,
-            token,
-            Interest::READABLE,
-        );
+        let _ = server
+            .poll
+            .registry()
+            .reregister(stream, token, Interest::READABLE);
     }
 }
 
@@ -1438,7 +1698,12 @@ fn close_connection(server: &mut Server, slab_key: usize) {
 }
 
 /// Build a complete HTTP error response.
-fn build_error_response(status_code: u16, status_text: &str, extra: &str, user_agent: Option<&str>) -> Vec<u8> {
+fn build_error_response(
+    status_code: u16,
+    status_text: &str,
+    extra: &str,
+    user_agent: Option<&str>,
+) -> Vec<u8> {
     // For 400 errors, extra is used as arg (empty string)
     // The form is the generic bad-request message
     let form = "Your request has bad syntax or is inherently impossible to satisfy.\n";
