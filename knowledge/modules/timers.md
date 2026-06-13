@@ -4,7 +4,7 @@
 `legacy/src/timers.c` (403 lines) → `rust/crates/thttpd-timers/src/lib.rs` (253 lines)
 
 ## Status
-Migrated. 81/81 differential tests pass.
+Migrated. 105 differential scenarios pass.
 
 ## What It Does
 Provides one-shot and periodic timers for idle connection cleanup, bandwidth throttling, and other timed events. C used a hash table of sorted linked lists; Rust uses a `BinaryHeap<Reverse<TimerEntry>>`.

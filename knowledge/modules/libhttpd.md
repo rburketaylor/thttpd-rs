@@ -4,7 +4,7 @@
 `legacy/src/libhttpd.c` (4,230 lines) → `rust/crates/thttpd-http/src/` (995 lines across 8 modules)
 
 ## Status
-Migrated. 81/81 differential tests pass.
+Migrated. 105 differential scenarios pass.
 
 ## What It Does
 The heart of the server. Handles HTTP request parsing, response generation, CGI dispatch, directory listing, and error pages. In C this was a single monolithic file; in Rust it's split into focused modules:

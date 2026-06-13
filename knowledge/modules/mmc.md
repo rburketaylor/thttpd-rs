@@ -4,7 +4,7 @@
 `legacy/src/mmc.c` (529 lines) → `rust/crates/thttpd-mmc/src/lib.rs` (200 lines)
 
 ## Status
-Migrated. 81/81 differential tests pass.
+Migrated. 105 differential scenarios pass.
 
 ## What It Does
 Caches file contents in memory using memory-mapped files. Provides reference-counted handles so files can be served concurrently without copying. C used manual `refcount` + `mmap()`; Rust uses `Rc<Mmap>` + `Rc::strong_count()`.

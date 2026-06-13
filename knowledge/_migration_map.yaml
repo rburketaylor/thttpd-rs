@@ -5,54 +5,55 @@ migrations:
   - c_module: match.c
     rust_crate: thttpd-match
     status: verified
-    parity: "100%"
-    notes: "Direct translation. Shell-style glob matching preserved. 81/81 differential tests pass."
+    parity: "request scenarios verified"
+    notes: "Direct translation. Shell-style glob matching preserved. 105 differential scenarios pass."
 
   - c_module: mime
     rust_crate: thttpd-mime
     status: verified
-    parity: "100%"
-    notes: "Static tables converted to match statements. 81/81 differential tests pass."
+    parity: "request scenarios verified"
+    notes: "Static tables converted to match statements. 105 differential scenarios pass."
 
   - c_module: tdate_parse.c
     rust_crate: thttpd-tdate
     status: verified
-    parity: "100%"
-    notes: "HTTP date parsing with epoch calculation. 81/81 differential tests pass."
+    parity: "request scenarios verified"
+    notes: "HTTP date parsing with epoch calculation. 105 differential scenarios pass."
 
   - c_module: fdwatch.c
     rust_crate: thttpd-fdwatch
     status: verified
-    parity: "100%"
-    notes: "Thin mio wrapper replacing select()/poll(). Token constants for dispatch. 81/81 differential tests pass."
+    parity: "request scenarios verified"
+    notes: "Thin mio wrapper replacing select()/poll(). Token constants for dispatch. 105 differential scenarios pass."
 
   - c_module: timers.c
     rust_crate: thttpd-timers
     status: verified
-    parity: "100%"
-    notes: "BinaryHeap replaces hash-of-sorted-lists. Lazy cancellation. 81/81 differential tests pass."
+    parity: "request scenarios verified"
+    notes: "BinaryHeap replaces hash-of-sorted-lists. Lazy cancellation. 105 differential scenarios pass."
 
   - c_module: mmc.c
     rust_crate: thttpd-mmc
     status: verified
-    parity: "100%"
-    notes: "Rc<Mmap> for reference counting. HashMap for cache. 81/81 differential tests pass."
+    parity: "request scenarios verified"
+    notes: "Rc<Mmap> for reference counting. HashMap for cache. 105 differential scenarios pass."
 
   - c_module: libhttpd.c
     rust_crate: thttpd-http
     status: verified
-    parity: "100%"
-    notes: "Split into parse, response, cgi, dirlist, conn, method, url, error modules. 81/81 differential tests pass."
+    parity: "request scenarios verified"
+    notes: "Split into parse, response, cgi, dirlist, conn, method, url, error modules. 105 differential scenarios pass."
 
   - c_module: thttpd.c
     rust_crate: thttpd-core
     status: verified
-    parity: "100%"
-    notes: "Event loop, startup, signal handling, throttling, config. 81/81 differential tests pass."
+    parity: "partial operational parity"
+    notes: "Event loop, startup, signals, and config are implemented. Runtime throttle enforcement and other operational deviations are tracked separately."
 
 test_summary:
-  differential_tests: 81
+  differential_tests: 105
   harness_tests: 80
-  unit_tests: 58
-  total: 219
+  rust_unit_tests: 95
+  comparator_unit_tests: 63
+  total: 343
   failing: 0

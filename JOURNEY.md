@@ -129,9 +129,10 @@ When no `Content-Length` header was present (e.g. `Transfer-Encoding: chunked`),
 |---|---|
 | Differential tests (C vs Rust) | **105/105** ✅ |
 | C-only harness tests | **80/80** ✅ |
-| Rust unit tests | **91/91** ✅ |
+| Rust unit tests | **95/95** ✅ |
+| Comparator unit tests | **63/63** ✅ |
 | Pipeline validation | **PASS** ✅ |
-| **Total** | **276/276** |
+| **Total** | **343/343** |
 
 All 7 previously deferred slow-lifecycle tests now pass: connection timeout, slow loris, idle connection cleanup, multiple connections, keep-alive, pipelined requests, and throttle pause/resume.
 
@@ -151,6 +152,21 @@ All 7 previously deferred slow-lifecycle tests now pass: connection timeout, slo
 
 ---
 
-## The Verdict
+## Phase G: Verification and Operational Honesty — Complete (2026-06-13)
 
-The migration is **complete**. The Rust binary is a fully validated, byte-exact drop-in replacement for the C thttpd. 276 tests pass with zero failures across three independent test suites.
+The comparator itself became part of the trusted computing base. Normalized
+mode previously marked `body_sha256` as matched unconditionally; it now hashes
+the normalized body and fails on every remaining mutation. Exact and normalized
+profiles are explicit, and 63 comparator tests run in CI.
+
+This phase also added legacy config parsing, corrected chroot -> bind -> setuid
+ordering, wrote configured pidfiles, restored the legacy 403 result for an
+unreadable `.htpasswd`, and established `make verify` as the complete gate.
+
+## Current Verdict
+
+Request behavior is strongly characterized by 105 C-vs-Rust scenarios, with
+normalization documented field by field. The server is not yet described as a
+full operational drop-in replacement: throttle enforcement, daemonization,
+request logging, CGI resource controls, IPv6, and several CLI/config surfaces
+remain in `docs/KNOWN_DEVIATIONS.md`.

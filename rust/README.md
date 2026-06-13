@@ -1,6 +1,8 @@
 # thttpd-rs — Rust Workspace
 
-A byte-exact Rust port of sthttpd 2.27.0, proven by 81 differential tests against the original C binary.
+A behavior-preserving Rust port of sthttpd 2.27.0, exercised by 105
+differential scenarios against the original C binary. Deterministic values are
+compared exactly; documented nondeterministic values are normalized explicitly.
 
 ## Crate Map
 
@@ -17,16 +19,16 @@ thttpd-core          main(), event loop, signals, throttling, config
 
 ## Crates
 
-| Crate | C Source | Lines | What It Does |
-|-------|----------|-------|-------------|
-| `thttpd-core` | `thttpd.c` | 454 | Event loop, startup, signal handling, bandwidth throttling |
-| `thttpd-http` | `libhttpd.c` | 995 | HTTP parsing FSM, CGI dispatch, response builder, directory listing |
-| `thttpd-fdwatch` | `fdwatch.c` | 72 | Thin mio wrapper with token-based dispatch |
-| `thttpd-timers` | `timers.c` | 253 | BinaryHeap timer wheel with lazy cancellation |
-| `thttpd-mmc` | `mmc.c` | 200 | Memory-mapped file cache with reference counting |
-| `thttpd-match` | `match.c` | 132 | Shell-style glob pattern matching |
-| `thttpd-tdate` | `tdate_parse.c` | 228 | HTTP date parsing (3 formats) |
-| `thttpd-mime` | `mime_types.h` | 95 | MIME type and encoding lookup tables |
+| Crate | C Source | What It Does |
+|-------|----------|-------------|
+| `thttpd-core` | `thttpd.c` | Event loop, startup, signal handling, configuration, throttle model |
+| `thttpd-http` | `libhttpd.c` | HTTP parsing FSM, CGI dispatch, response builder, directory listing |
+| `thttpd-fdwatch` | `fdwatch.c` | Thin mio wrapper with token-based dispatch |
+| `thttpd-timers` | `timers.c` | BinaryHeap timer wheel with lazy cancellation |
+| `thttpd-mmc` | `mmc.c` | Memory-mapped file cache with reference counting |
+| `thttpd-match` | `match.c` | Shell-style glob pattern matching |
+| `thttpd-tdate` | `tdate_parse.c` | HTTP date parsing (3 formats) |
+| `thttpd-mime` | `mime_types.h` | MIME type and encoding lookup tables |
 
 ## Building
 
@@ -37,7 +39,7 @@ cargo build --workspace
 # Release build (for testing against C binary)
 cargo build --release
 
-# Run all unit tests (91 tests)
+# Run all Rust unit tests
 cargo test --workspace
 ```
 
@@ -53,7 +55,9 @@ poll() → accept connections
       → write response, linger-close
 ```
 
-This deliberately matches thttpd's original architecture — the port is a translation, not a redesign.
+This deliberately matches thttpd's original architecture. Operational gaps are
+tracked in `../docs/KNOWN_DEVIATIONS.md` rather than hidden behind a drop-in
+replacement claim.
 
 ## Key Dependencies
 
