@@ -1,8 +1,20 @@
 """Response comparison engine for thttpd golden master testing.
-8-field differential comparison with normalization support."""
+
+The comparator has two explicit profiles:
+
+``exact``
+    Compare every captured field without normalization.
+``normalized``
+    Compare deterministic fields exactly and normalize only documented
+    nondeterministic values before comparing header values and body hashes.
+"""
 
 import hashlib
 import re
+
+PROFILE_EXACT = "exact"
+PROFILE_NORMALIZED = "normalized"
+COMPARISON_PROFILES = {PROFILE_EXACT, PROFILE_NORMALIZED}
 
 # ======================================================================
 # Normalizer 1: Timestamp Fields
@@ -146,6 +158,13 @@ def field_result(field, exp, act, match=None):
     }
 
 
+def _with_profile(results, profile):
+    """Attach the active comparison profile to every field result."""
+    for result in results:
+        result["profile"] = profile
+    return results
+
+
 # ======================================================================
 # Body normalizer (combined)
 # ======================================================================
@@ -157,6 +176,14 @@ def normalize_body(value):
         value = normalize_cgi_output(value)
         value = normalize_pwd(value)
     return value
+
+
+def normalize_body_bytes(value):
+    """Normalize a response body while preserving a reversible byte mapping."""
+    if not isinstance(value, bytes):
+        raise TypeError("response body must be bytes")
+    normalized = normalize_body(value.decode("latin-1"))
+    return normalized.encode("latin-1")
 
 
 def normalize_pwd(value):
@@ -200,14 +227,20 @@ def compare_responses(expected, actual):
             "actual": act,
         })
 
-    return results
+    return _with_profile(results, PROFILE_EXACT)
 
 
 # ======================================================================
 # compare_responses_v2 (with normalization)
 # ======================================================================
 
-def compare_responses_v2(expected, actual, test_name="", strict=False):
+def compare_responses_v2(
+    expected,
+    actual,
+    test_name="",
+    strict=False,
+    profile=PROFILE_NORMALIZED,
+):
     """Compare two HTTP responses with normalization for non-deterministic fields.
 
     Applies normalizers to timestamp headers, temp directory paths,
@@ -218,12 +251,19 @@ def compare_responses_v2(expected, actual, test_name="", strict=False):
                  [body optional], body_sha256, body_length, connection_result).
         actual: Dict with same structure as expected.
         test_name: Name of the test (may be used for test-specific logic).
-        strict: If True, use exact comparison (no normalization).
+        strict: Backward-compatible alias for ``profile="exact"``.
+        profile: ``"exact"`` or ``"normalized"``.
 
     Returns:
         List of {field, match, expected, actual} dicts.
     """
+    del test_name  # Reserved for future per-scenario reporting.
+
     if strict:
+        profile = PROFILE_EXACT
+    if profile not in COMPARISON_PROFILES:
+        raise ValueError(f"unknown comparison profile: {profile}")
+    if profile == PROFILE_EXACT:
         return compare_responses(expected, actual)
 
     results = []
@@ -252,25 +292,24 @@ def compare_responses_v2(expected, actual, test_name="", strict=False):
         "header_values", expected["headers"], actual["headers"],
         match=len(hdr_mismatches) == 0))
 
-    # 6. Body SHA-256 — skip by default (identity in non-strict mode)
-    results.append(field_result(
-        "body_sha256",
-        expected.get("body_sha256"),
-        actual.get("body_sha256"),
-        match=True))
-
-    # 7. Body content / length — normalize if we have raw body
+    # 6-7. Normalize raw bodies when available, then compare their hashes and
+    # lengths. Baseline-style responses without raw bodies must compare their
+    # captured hashes exactly; a missing body never becomes an automatic pass.
     exp_has_body = "body" in expected and isinstance(expected["body"], bytes)
     act_has_body = "body" in actual and isinstance(actual["body"], bytes)
     if exp_has_body and act_has_body:
-        exp_body_str = expected["body"].decode("latin-1", errors="replace")
-        act_body_str = actual["body"].decode("latin-1", errors="replace")
-        exp_norm = normalize_body(exp_body_str)
-        act_norm = normalize_body(act_body_str)
-        results.append(field_result("body_normalized", exp_norm, act_norm))
+        exp_norm = normalize_body_bytes(expected["body"])
+        act_norm = normalize_body_bytes(actual["body"])
+        exp_hash = sha256_bytes(exp_norm)
+        act_hash = sha256_bytes(act_norm)
+        results.append(field_result("body_sha256", exp_hash, act_hash))
         results.append(field_result(
             "body_length", len(exp_norm), len(act_norm)))
     else:
+        results.append(field_result(
+            "body_sha256",
+            expected.get("body_sha256"),
+            actual.get("body_sha256")))
         results.append(field_result(
             "body_length", expected["body_length"], actual["body_length"]))
 
@@ -280,7 +319,7 @@ def compare_responses_v2(expected, actual, test_name="", strict=False):
         expected["connection_result"],
         actual["connection_result"]))
 
-    return results
+    return _with_profile(results, PROFILE_NORMALIZED)
 
 
 def sha256_bytes(data):

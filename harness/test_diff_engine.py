@@ -12,9 +12,12 @@ from harness.diff_engine import (
     normalize_cgi_output,
     check_directory_listing_structure,
     normalize_body,
+    normalize_body_bytes,
     compare_responses,
     compare_responses_v2,
     field_result,
+    PROFILE_EXACT,
+    PROFILE_NORMALIZED,
 )
 
 
@@ -450,7 +453,7 @@ class TestCompareResponsesV2:
         assert not date_results[0]["match"]
 
     def test_compare_v2_body_without_raw_body(self):
-        """Response without raw body field (baseline-style) compares length directly."""
+        """Baseline-style responses still compare their captured body hash."""
         headers = {"content-type": "text/html"}
         exp = {
             "status_code": 200,
@@ -469,8 +472,44 @@ class TestCompareResponsesV2:
             "connection_result": "ok",
         }
         results = compare_responses_v2(exp, act)
-        for r in results:
-            assert r["match"], f"Field {r['field']} did not match: {r}"
+        body_hash = [r for r in results if r["field"] == "body_sha256"][0]
+        assert not body_hash["match"]
+
+    def test_compare_v2_detects_body_mutation(self):
+        """A deterministic body mutation must fail normalized comparison."""
+        exp = make_response_dict(body=b"original body")
+        act = make_response_dict(body=b"mutated body")
+        results = compare_responses_v2(exp, act)
+        body_hash = [r for r in results if r["field"] == "body_sha256"][0]
+        assert not body_hash["match"]
+
+    def test_compare_v2_hashes_normalized_body(self):
+        """Only documented dynamic values are removed before body hashing."""
+        exp = make_response_dict(body=b"SERVER_PORT=41001\nvalue=stable\n")
+        act = make_response_dict(body=b"SERVER_PORT=52002\nvalue=stable\n")
+        results = compare_responses_v2(exp, act)
+        body_hash = [r for r in results if r["field"] == "body_sha256"][0]
+        assert body_hash["match"]
+
+    def test_compare_v2_reports_profile(self):
+        normalized = compare_responses_v2(make_response_dict(), make_response_dict())
+        exact = compare_responses_v2(
+            make_response_dict(), make_response_dict(), profile=PROFILE_EXACT
+        )
+        assert {r["profile"] for r in normalized} == {PROFILE_NORMALIZED}
+        assert {r["profile"] for r in exact} == {PROFILE_EXACT}
+
+    def test_compare_v2_rejects_unknown_profile(self):
+        with __import__("pytest").raises(ValueError, match="unknown comparison profile"):
+            compare_responses_v2(
+                make_response_dict(), make_response_dict(), profile="permissive"
+            )
+
+
+class TestNormalizeBodyBytes:
+    def test_preserves_non_utf8_bytes(self):
+        body = b"\xff\x00stable"
+        assert normalize_body_bytes(body) == body
 
     def test_compare_v2_header_path_normalized(self):
         """Path normalization in headers -> match."""
