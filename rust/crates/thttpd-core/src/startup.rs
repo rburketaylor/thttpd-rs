@@ -20,20 +20,26 @@ pub fn bind_listeners(config: &ServerConfig) -> std::io::Result<Vec<TcpListener>
 }
 
 /// Perform chroot if configured.
-pub fn do_chroot(config: &ServerConfig) -> Result<(), String> {
+///
+/// After `chroot(config.dir)` the original absolute path no longer resolves
+/// inside the jail, so the serving root must move to `/`, matching
+/// `legacy/src/thttpd.c:587` (`strcpy(cwd, "/")`). Rewriting `config.dir`
+/// keeps request resolution (`config.dir.join(...)`) and the symlink
+/// boundary check (`canonicalize(config.dir)`) correct within the new root.
+pub fn do_chroot(config: &mut ServerConfig) -> Result<(), String> {
     if !config.do_chroot {
         return Ok(());
     }
     #[cfg(unix)]
     {
-        use std::path::Path;
-        let dir = Path::new(&config.dir);
-        if let Err(e) = nix::unistd::chroot(dir) {
+        let dir = config.dir.clone();
+        if let Err(e) = nix::unistd::chroot(&dir) {
             return Err(format!("chroot failed: {e}"));
         }
         if let Err(e) = nix::unistd::chdir("/") {
             return Err(format!("chdir after chroot failed: {e}"));
         }
+        config.dir = std::path::PathBuf::from("/");
         Ok(())
     }
     #[cfg(not(unix))]
@@ -74,7 +80,10 @@ pub fn drop_privileges(config: &ServerConfig) -> Result<(), String> {
     Ok(())
 }
 
-/// Write the configured pidfile after startup has completed successfully.
+/// Write the configured pidfile while still root and before chroot, so a
+/// conventional `/var/run/...pid` outside the chroot tree stays writable.
+/// Mirrors `legacy/src/thttpd.c:533-544`, which precedes both chroot and
+/// `setuid`.
 pub fn write_pidfile(config: &ServerConfig) -> Result<(), String> {
     let Some(path) = &config.pidfile else {
         return Ok(());

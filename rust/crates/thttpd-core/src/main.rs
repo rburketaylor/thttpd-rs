@@ -5,7 +5,7 @@ use clap::Parser;
 
 fn main() {
     let cli = thttpd_core::config::Cli::parse();
-    let config = match thttpd_core::config::ServerConfig::from_cli(&cli) {
+    let mut config = match thttpd_core::config::ServerConfig::from_cli(&cli) {
         Ok(config) => config,
         Err(error) => {
             eprintln!("thttpd: {error}");
@@ -13,9 +13,19 @@ fn main() {
         }
     };
 
-    // Security-critical ordering: chroot → bind → setuid
-    // (libhttpd.c:469-540)
-    if let Err(e) = thttpd_core::startup::do_chroot(&config) {
+    // Write the pidfile first, while still root and before chroot, so a
+    // pidfile outside the chroot tree (e.g. /var/run/thttpd.pid) remains
+    // writable. Legacy order: pidfile -> chroot -> bind -> setuid
+    // (thttpd.c:533,558,637,705).
+    if let Err(e) = thttpd_core::startup::write_pidfile(&config) {
+        eprintln!("thttpd: {e}");
+        std::process::exit(1);
+    }
+
+    // Security-critical ordering: chroot -> bind -> setuid
+    // (libhttpd.c:469-540). do_chroot rewrites config.dir to "/" inside the
+    // jail so request resolution stays correct.
+    if let Err(e) = thttpd_core::startup::do_chroot(&mut config) {
         eprintln!("thttpd: {e}");
         std::process::exit(1);
     }
@@ -34,11 +44,6 @@ fn main() {
     // Install signal handlers
     if let Err(e) = thttpd_core::signal::install_signal_handlers() {
         eprintln!("thttpd: signal handler setup failed: {e}");
-        std::process::exit(1);
-    }
-
-    if let Err(e) = thttpd_core::startup::write_pidfile(&config) {
-        eprintln!("thttpd: {e}");
         std::process::exit(1);
     }
 
