@@ -50,7 +50,7 @@ jobs:
         run: |
           python3 -m pytest harness/tests/ --ignore=harness/tests/test_differential.py \
             -v --timeout=30 --timeout-method=thread
-      - name: Run differential tests (81 tests, C vs Rust)
+      - name: Run differential tests (105 tests, C vs Rust)
         run: |
           python3 -m pytest harness/tests/test_differential.py \
             -v --timeout=120 --timeout-method=thread

@@ -514,6 +514,7 @@ dependencies = [
  "signal-hook",
  "signal-hook-mio",
  "slab",
+ "tempfile",
  "thttpd-fdwatch",
  "thttpd-http",
  "thttpd-match",
