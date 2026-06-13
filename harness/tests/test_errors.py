@@ -3,6 +3,8 @@ import os
 import stat
 import socket
 import time
+import sys
+
 import pytest
 
 from conftest import http_request, parse_response
@@ -92,6 +94,10 @@ class TestErrors:
         # Cleanup
         no_read.chmod(0o644)
 
+    @pytest.mark.skipif(
+        sys.platform == "darwin",
+        reason="the legacy C reference crashes on an outside-root symlink on macOS",
+    )
     def test_symlink_outside_root(self, server_process, www_root):
         """Symlink pointing outside root returns 403."""
         proc, port = server_process

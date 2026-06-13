@@ -5,6 +5,7 @@ against both servers and compares responses using compare_responses_v2().
 """
 import os
 import socket
+import sys
 import time
 import threading
 import pytest
@@ -912,6 +913,10 @@ class TestDifferentialErrors:
 
         no_read.chmod(0o644)
 
+    @pytest.mark.skipif(
+        sys.platform == "darwin",
+        reason="the legacy C reference crashes on an outside-root symlink on macOS",
+    )
     def test_symlink_outside_root(self, dual_server_process, www_root_session):
         c_proc, c_port, rust_proc, rust_port = dual_server_process
         outside_link = www_root_session / "outside_link"

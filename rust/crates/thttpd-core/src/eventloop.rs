@@ -877,6 +877,31 @@ fn serve_static(server: &mut Server, slab_key: usize, file_path: &Path) {
                 transition_to_sending(server, slab_key);
                 return;
             }
+            thttpd_http::auth::AuthResult::Forbidden => {
+                let user_agent = server.conns[slab_key].http.user_agent.clone();
+                let body = error_page(
+                    403,
+                    "Forbidden",
+                    "The requested URL '%.80s' is not accessible.\n",
+                    &encoded_url,
+                    Some(&user_agent),
+                );
+                let http_ref = &server.conns[slab_key].http;
+                let response =
+                    build_full_response(http_ref, 403, "Forbidden", "text/html", -1, 0, &[]);
+                let full_response = if http_ref.mime_flag {
+                    let mut response = response;
+                    response.extend_from_slice(&body);
+                    response
+                } else {
+                    body
+                };
+                let slot = &mut server.conns[slab_key];
+                slot.http.response = full_response;
+                slot.http.response_len = slot.http.response.len();
+                transition_to_sending(server, slab_key);
+                return;
+            }
         }
     }
 

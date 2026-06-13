@@ -224,8 +224,9 @@ def www_root_session(tmp_path_factory):
     (secret / "data.txt").write_text("secret content")
     # MD5 crypt hash of "secret" with salt "abcd" — generated via:
     #   openssl passwd -1 -salt abcd secret
-    #   => $1$abcd$Oy8OD9LGKv7H9yIMreLNV1
-    (secret / ".htpasswd").write_text("alice:$1$abcd$Oy8OD9LGKv7H9yIMreLNV1\n")
+    # Traditional DES crypt is supported by both macOS and Linux libc:
+    # crypt("secret", "ab") => abNANd1rDfiNc
+    (secret / ".htpasswd").write_text("alice:abNANd1rDfiNc\n")
     (secret / ".htpasswd").chmod(0o644)
 
     # Non-CGI executable file (should be 403 per libhttpd.c:3790-3799)
@@ -722,4 +723,3 @@ def dual_server_process_with_throttle(c_binary, rust_binary, www_root_session, t
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait(timeout=2)
-

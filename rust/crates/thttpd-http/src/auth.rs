@@ -17,15 +17,15 @@ pub const AUTH_FILE: &str = ".htpasswd";
 pub const ERR_401_TITLE: &str = "Unauthorized";
 
 /// Format string for the 401 response body (matches C's `err401form`).
-pub const ERR_401_FORM: &str =
-    "Authorization required for the URL '%.80s'.\n";
+pub const ERR_401_FORM: &str = "Authorization required for the URL '%.80s'.\n";
 
 /// Check whether a directory requires Basic Auth.
 ///
 /// Returns:
 /// - `AuthResult::Ok` if no `.htpasswd` exists or auth was successful
 /// - `AuthResult::NoAuthFile` if no `.htpasswd` in the directory tree
-/// - `AuthResult::Unauthorized(String)` if auth is required and missing/wrong
+/// - `AuthResult::Unauthorized` if auth is required and missing/wrong
+/// - `AuthResult::Forbidden` if the password file exists but cannot be read
 ///
 /// `authorization` is the value of the `Authorization:` header (may be empty).
 /// `path` is the on-disk path to the file being served (used to find the
@@ -51,6 +51,8 @@ pub enum AuthResult {
     Ok,
     /// `.htpasswd` exists, auth is required (sends 401 to client).
     Unauthorized,
+    /// `.htpasswd` exists but cannot be read (sends 403 to client).
+    Forbidden,
 }
 
 /// Read the .htpasswd file and verify the user. Mirrors the C logic at
@@ -67,11 +69,7 @@ fn check_htpasswd(auth_path: &Path, authorization: &str, _file_path: &Path) -> A
     // Read the .htpasswd file. Format: one user per line: "user:crypt_hash"
     let content = match std::fs::read_to_string(auth_path) {
         Ok(c) => c,
-        Err(_) => {
-            // File exists but we can't read it. C returns 403 here, but for
-            // simplicity we treat as unauthorized (file unreadable = 401).
-            return AuthResult::Unauthorized;
-        }
+        Err(_) => return AuthResult::Forbidden,
     };
 
     for line in content.lines() {
@@ -151,8 +149,7 @@ fn verify_password(password: &str, stored_hash: &str) -> bool {
     };
     // C uses strcmp to compare the crypted password with the stored hash.
     // Copy the result out of the libc buffer before releasing the Mutex.
-    let matched = result_str == stored_hash;
-    matched
+    result_str == stored_hash
 }
 
 /// Global Mutex to serialize crypt(3) calls. glibc's crypt() returns a
@@ -182,7 +179,10 @@ mod tests {
     fn test_parse_basic_auth_with_password_colon() {
         // base64("bob:pass:with:colons") = "Ym9iOnBhc3M6d2l0aDpjb2xvbnM="
         let result = parse_basic_auth("Basic Ym9iOnBhc3M6d2l0aDpjb2xvbnM=");
-        assert_eq!(result, Some(("bob".to_string(), "pass:with:colons".to_string())));
+        assert_eq!(
+            result,
+            Some(("bob".to_string(), "pass:with:colons".to_string()))
+        );
     }
 
     #[test]
@@ -238,7 +238,10 @@ mod tests {
 
         // base64("alice:wrong")
         use base64::Engine;
-        let auth = format!("Basic {}", base64::engine::general_purpose::STANDARD.encode("alice:wrong"));
+        let auth = format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD.encode("alice:wrong")
+        );
         let result = auth_check2(&file, &auth);
         assert_eq!(result, AuthResult::Unauthorized);
     }
@@ -248,15 +251,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let htpasswd = dir.path().join(".htpasswd");
         let mut f = std::fs::File::create(&htpasswd).unwrap();
-        // MD5 crypt of "secret" with salt "abcd" = "$1$abcd$Oy8OD9LGKv7H9yIMreLNV1"
-        writeln!(f, "alice:$1$abcd$Oy8OD9LGKv7H9yIMreLNV1").unwrap();
+        // Traditional DES crypt is supported by the libc implementations on
+        // both macOS and Linux. crypt("secret", "ab") = "abNANd1rDfiNc".
+        writeln!(f, "alice:abNANd1rDfiNc").unwrap();
 
         let file = dir.path().join("data.txt");
         std::fs::write(&file, "data").unwrap();
 
         // base64("alice:secret")
         use base64::Engine;
-        let auth = format!("Basic {}", base64::engine::general_purpose::STANDARD.encode("alice:secret"));
+        let auth = format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD.encode("alice:secret")
+        );
         let result = auth_check2(&file, &auth);
         assert_eq!(result, AuthResult::Ok);
     }
@@ -273,8 +280,22 @@ mod tests {
 
         // base64("bob:secret")
         use base64::Engine;
-        let auth = format!("Basic {}", base64::engine::general_purpose::STANDARD.encode("bob:secret"));
+        let auth = format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD.encode("bob:secret")
+        );
         let result = auth_check2(&file, &auth);
         assert_eq!(result, AuthResult::Unauthorized);
+    }
+
+    #[test]
+    fn test_auth_check2_unreadable_password_path_is_forbidden() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".htpasswd")).unwrap();
+        let file = dir.path().join("data.txt");
+        std::fs::write(&file, "data").unwrap();
+
+        let result = auth_check2(&file, "Basic YWxpY2U6c2VjcmV0");
+        assert_eq!(result, AuthResult::Forbidden);
     }
 }
