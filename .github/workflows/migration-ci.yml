@@ -7,57 +7,46 @@ on:
     branches: [main]
 
 jobs:
-  build-rust:
+  quality:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-      - name: Build Rust workspace
-        run: cargo build --manifest-path rust/Cargo.toml --workspace --release
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.85'
+          components: rustfmt, clippy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -r requirements-dev.txt
+      - name: Format, lint, unit, comparator, and knowledge checks
+        run: make check
 
-  build-legacy:
+  security:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Build C thttpd
-        run: bash pipeline/build_legacy.sh
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.85'
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit,cargo-deny
+      - name: Dependency policy and advisory checks
+        run: make security
 
-  unit-tests:
-    runs-on: ubuntu-latest
-    needs: build-rust
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-      - name: Run Rust unit tests
-        run: cargo test --manifest-path rust/Cargo.toml --workspace
-
-  harness-tests:
-    runs-on: ubuntu-latest
-    needs: [build-rust, build-legacy]
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-      - name: Install Python dependencies
-        run: pip install pytest pytest-timeout pyyaml
-      - name: Build both binaries
-        run: |
-          bash pipeline/build_legacy.sh
-          cargo build --manifest-path rust/Cargo.toml --release
-      - name: Run C-only harness tests (80 tests)
-        run: |
-          python3 -m pytest harness/tests/ --ignore=harness/tests/test_differential.py \
-            -v --timeout=30 --timeout-method=thread
-      - name: Run differential tests (105 tests, C vs Rust)
-        run: |
-          python3 -m pytest harness/tests/test_differential.py \
-            -v --timeout=120 --timeout-method=thread
-
-  knowledge-consistency:
+  integration:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Validate knowledge system
-        run: python3 pipeline/validate_knowledge.py
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.85'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -r requirements-dev.txt
+      - name: Build both implementations and run parity suites
+        run: make integration
