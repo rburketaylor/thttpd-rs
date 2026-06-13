@@ -49,7 +49,9 @@ impl ResponseBuilder {
     /// Build the complete response as bytes.
     pub fn build(self) -> Vec<u8> {
         let mut out = Vec::new();
-        out.extend_from_slice(format!("HTTP/1.0 {} {}\r\n", self.status_code, self.status_text).as_bytes());
+        out.extend_from_slice(
+            format!("HTTP/1.0 {} {}\r\n", self.status_code, self.status_text).as_bytes(),
+        );
         for (name, value) in &self.headers {
             out.extend_from_slice(format!("{}: {}\r\n", name, value).as_bytes());
         }
@@ -96,7 +98,11 @@ pub fn build_full_response(
     let mod_str = thttpd_tdate::format_http_date(mod_time);
 
     // Apply charset to text/* types (use http.charset if set, else default)
-    let charset = if http.charset.is_empty() { "iso-8859-1" } else { http.charset.as_str() };
+    let charset = if http.charset.is_empty() {
+        "iso-8859-1"
+    } else {
+        http.charset.as_str()
+    };
     let fixed_type = if content_type.starts_with("text/") && !content_type.contains("charset=") {
         format!("{}; charset={}", content_type, charset)
     } else {
@@ -106,16 +112,16 @@ pub fn build_full_response(
     let mut out = Vec::new();
 
     // Check for range upgrade BEFORE writing status line
-    let (final_status, final_status_text, partial_content) =
-        if http.got_range && status == 200
-            && http.last_byte_index >= http.first_byte_index
-            && (http.last_byte_index != length - 1 || http.first_byte_index != 0)
-            && (http.range_if.is_none() || http.range_if == Some(mod_time))
-        {
-            (206, "Partial Content", true)
-        } else {
-            (status, status_text, false)
-        };
+    let (final_status, final_status_text, partial_content) = if http.got_range
+        && status == 200
+        && http.last_byte_index >= http.first_byte_index
+        && (http.last_byte_index != length - 1 || http.first_byte_index != 0)
+        && (http.range_if.is_none() || http.range_if == Some(mod_time))
+    {
+        (206, "Partial Content", true)
+    } else {
+        (status, status_text, false)
+    };
 
     // Status line — use the request's protocol version (C uses hc->protocol at
     // libhttpd.c:638). Fall back to HTTP/1.0 for HTTP/0.9 (no version token).
@@ -124,7 +130,9 @@ pub fn build_full_response(
     } else {
         http.http_version.clone()
     };
-    out.extend_from_slice(format!("{} {} {}\r\n", protocol, final_status, final_status_text).as_bytes());
+    out.extend_from_slice(
+        format!("{} {} {}\r\n", protocol, final_status, final_status_text).as_bytes(),
+    );
 
     // Standard headers in C order
     out.extend_from_slice(format!("Server: {}\r\n", SERVER_SOFTWARE).as_bytes());
@@ -153,8 +161,11 @@ pub fn build_full_response(
     if partial_content {
         let range_len = http.last_byte_index - http.first_byte_index + 1;
         out.extend_from_slice(
-            format!("Content-Range: bytes {}-{}/{}\r\n",
-                http.first_byte_index, http.last_byte_index, length).as_bytes()
+            format!(
+                "Content-Range: bytes {}-{}/{}\r\n",
+                http.first_byte_index, http.last_byte_index, length
+            )
+            .as_bytes(),
         );
         out.extend_from_slice(format!("Content-Length: {}\r\n", range_len).as_bytes());
     } else if length >= 0 {
@@ -191,11 +202,21 @@ fn defang(s: &str) -> String {
 /// `form` is the error-specific message (may contain `%.80s` placeholder for `arg`).
 /// `user_agent` triggers MSIE padding if it contains the substring "MSIE"
 /// (matching C's `match("**MSIE**", hc->useragent)` at libhttpd.c:742-749).
-pub fn error_page(status: u16, title: &str, form: &str, arg: &str, user_agent: Option<&str>) -> Vec<u8> {
+pub fn error_page(
+    status: u16,
+    title: &str,
+    form: &str,
+    arg: &str,
+    user_agent: Option<&str>,
+) -> Vec<u8> {
     let defanged = defang(arg);
 
     let body_message = if form.contains("%.80s") {
-        let truncated = if defanged.len() > 80 { &defanged[..80] } else { &defanged };
+        let truncated = if defanged.len() > 80 {
+            &defanged[..80]
+        } else {
+            &defanged
+        };
         form.replace("%.80s", truncated)
     } else {
         form.to_string()
@@ -215,7 +236,9 @@ pub fn error_page(status: u16, title: &str, form: &str, arg: &str, user_agent: O
     if user_agent.map(|ua| ua.contains("MSIE")).unwrap_or(false) {
         html.push_str("<!--\n");
         for _ in 0..6 {
-            html.push_str("Padding so that MSIE deigns to show this error instead of its own canned one.\n");
+            html.push_str(
+                "Padding so that MSIE deigns to show this error instead of its own canned one.\n",
+            );
         }
         html.push_str("-->\n");
     }
@@ -265,7 +288,13 @@ mod tests {
 
     #[test]
     fn test_error_page_404() {
-        let html = error_page(404, "Not Found", "The requested URL '%.80s' was not found on this server.\n", "/nonexistent.html", None);
+        let html = error_page(
+            404,
+            "Not Found",
+            "The requested URL '%.80s' was not found on this server.\n",
+            "/nonexistent.html",
+            None,
+        );
         let s = String::from_utf8(html).unwrap();
         assert!(s.contains("<TITLE>404 Not Found</TITLE>"));
         assert!(s.contains("<H2>404 Not Found</H2>"));
@@ -280,22 +309,39 @@ mod tests {
     #[test]
     fn test_error_page_msie_padding() {
         // MSIE user agent gets the 6-line padding block
-        let html = error_page(404, "Not Found", "not found\n", "x",
-            Some("Mozilla/4.0 (compatible; MSIE 6.0; Windows NT 5.1)"));
+        let html = error_page(
+            404,
+            "Not Found",
+            "not found\n",
+            "x",
+            Some("Mozilla/4.0 (compatible; MSIE 6.0; Windows NT 5.1)"),
+        );
         let s = String::from_utf8(html).unwrap();
         assert!(s.contains("<!--\n"));
         assert!(s.contains("-->\n"));
-        let pad_count = s.matches("Padding so that MSIE deigns to show this error").count();
-        assert_eq!(pad_count, 6, "MSIE padding must have exactly 6 lines (matches C's `for (n=0;n<6;n++)`)");
+        let pad_count = s
+            .matches("Padding so that MSIE deigns to show this error")
+            .count();
+        assert_eq!(
+            pad_count, 6,
+            "MSIE padding must have exactly 6 lines (matches C's `for (n=0;n<6;n++)`)"
+        );
         // Padding text matches C byte-for-byte
-        assert!(s.contains("Padding so that MSIE deigns to show this error instead of its own canned one.\n"));
+        assert!(s.contains(
+            "Padding so that MSIE deigns to show this error instead of its own canned one.\n"
+        ));
     }
 
     #[test]
     fn test_error_page_no_msie_no_padding() {
         // Non-MSIE user agent does not get padding
-        let html = error_page(404, "Not Found", "not found\n", "x",
-            Some("Mozilla/5.0 (X11; Linux x86_64) Firefox/100.0"));
+        let html = error_page(
+            404,
+            "Not Found",
+            "not found\n",
+            "x",
+            Some("Mozilla/5.0 (X11; Linux x86_64) Firefox/100.0"),
+        );
         let s = String::from_utf8(html).unwrap();
         assert!(!s.contains("Padding so that MSIE"));
         assert!(!s.contains("<!--"));

@@ -4,8 +4,8 @@
 
 use mio::net::TcpStream;
 use std::net::SocketAddr;
-use thttpd_http::conn::ConnState;
 use thttpd_http::HttpConn;
+use thttpd_http::conn::ConnState;
 
 /// A connection slot in the connection table.
 pub struct ConnSlot {

@@ -65,7 +65,13 @@ fn days_in_month(m: u32, y: i32) -> u32 {
     match m {
         0 | 2 | 4 | 6 | 7 | 9 | 11 => 31,
         3 | 5 | 8 | 10 => 30,
-        1 => if is_leap_year(y) { 29 } else { 28 },
+        1 => {
+            if is_leap_year(y) {
+                29
+            } else {
+                28
+            }
+        }
         _ => 0,
     }
 }
@@ -114,7 +120,7 @@ fn parse_rfc1123(s: &str) -> Option<i64> {
 
 fn parse_rfc850(s: &str) -> Option<i64> {
     // "Sunday, 06-Nov-94 08:49:37 GMT"
-    let parts: Vec<&str> = s.split(|c: char| c == ' ' || c == ',').filter(|p| !p.is_empty()).collect();
+    let parts: Vec<&str> = s.split([' ', ',']).filter(|p| !p.is_empty()).collect();
     if parts.len() < 4 {
         return None;
     }
@@ -162,7 +168,9 @@ fn parse_asctime(s: &str) -> Option<i64> {
 /// Returns the current time as an HTTP date string (RFC 1123 format).
 pub fn format_http_date(timestamp: i64) -> String {
     let days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-    let months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    let months = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
 
     let mut remaining = timestamp;
     let mut year = 1970i32;

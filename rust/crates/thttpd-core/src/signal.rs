@@ -45,7 +45,7 @@ pub fn got_usr1() -> bool {
 
 /// Set up signal handlers.
 pub fn install_signal_handlers() -> std::io::Result<()> {
-    use signal_hook::consts::{SIGTERM, SIGINT, SIGHUP, SIGUSR1, SIGPIPE};
+    use signal_hook::consts::{SIGHUP, SIGINT, SIGPIPE, SIGTERM, SIGUSR1};
     use signal_hook::flag;
 
     flag::register(SIGTERM, FLAGS.terminate.clone())?;

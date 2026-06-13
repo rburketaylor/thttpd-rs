@@ -11,7 +11,12 @@ use crate::parse_state::{GotRequest, ParseState};
 /// Returns (result, new_checked_idx, final_state).
 ///
 /// The transition table is byte-exact with `libhttpd.c:1773-1922`.
-pub fn got_request(read_buf: &[u8], mut checked_idx: usize, read_idx: usize, initial_state: ParseState) -> (GotRequest, usize, ParseState) {
+pub fn got_request(
+    read_buf: &[u8],
+    mut checked_idx: usize,
+    read_idx: usize,
+    initial_state: ParseState,
+) -> (GotRequest, usize, ParseState) {
     let mut state = initial_state;
 
     while checked_idx < read_idx {
@@ -38,7 +43,11 @@ pub fn got_request(read_buf: &[u8], mut checked_idx: usize, read_idx: usize, ini
                 b' ' | b'\t' => ParseState::SecondWs,
                 b'\r' | b'\n' => {
                     // HTTP/0.9: two-word request
-                    return (GotRequest::GotRequest, checked_idx + 1, ParseState::GotRequest);
+                    return (
+                        GotRequest::GotRequest,
+                        checked_idx + 1,
+                        ParseState::GotRequest,
+                    );
                 }
                 _ => ParseState::SecondWord,
             },
@@ -67,20 +76,36 @@ pub fn got_request(read_buf: &[u8], mut checked_idx: usize, read_idx: usize, ini
             },
             ParseState::Lf => match c {
                 b'\r' => ParseState::Cr,
-                b'\n' => return (GotRequest::GotRequest, checked_idx + 1, ParseState::GotRequest),
+                b'\n' => {
+                    return (
+                        GotRequest::GotRequest,
+                        checked_idx + 1,
+                        ParseState::GotRequest,
+                    );
+                }
                 _ => ParseState::Line,
             },
             ParseState::Cr => match c {
                 b'\n' => ParseState::Crlf,
                 b'\r' => {
                     // Two CRs in a row — end of request (libhttpd.c:1887-1889)
-                    return (GotRequest::GotRequest, checked_idx + 1, ParseState::GotRequest);
+                    return (
+                        GotRequest::GotRequest,
+                        checked_idx + 1,
+                        ParseState::GotRequest,
+                    );
                 }
                 _ => ParseState::Line,
             },
             ParseState::Crlf => match c {
                 b'\r' => ParseState::Crlfcr,
-                b'\n' => return (GotRequest::GotRequest, checked_idx + 1, ParseState::GotRequest),
+                b'\n' => {
+                    return (
+                        GotRequest::GotRequest,
+                        checked_idx + 1,
+                        ParseState::GotRequest,
+                    );
+                }
                 _ => ParseState::Line,
             },
             ParseState::Line => match c {
@@ -92,7 +117,11 @@ pub fn got_request(read_buf: &[u8], mut checked_idx: usize, read_idx: usize, ini
                 b'\r' | b'\n' => {
                     // Two CRLFs or two CRs in a row — end of request
                     // (libhttpd.c:1912-1914). Rust previously only accepted \n.
-                    return (GotRequest::GotRequest, checked_idx + 1, ParseState::GotRequest);
+                    return (
+                        GotRequest::GotRequest,
+                        checked_idx + 1,
+                        ParseState::GotRequest,
+                    );
                 }
                 _ => ParseState::Line,
             },
@@ -114,7 +143,7 @@ pub fn parse_method(read_buf: &[u8], end: usize) -> Method {
         .take_while(|&&b| b != b' ' && b != b'\t')
         .copied()
         .collect();
-    Method::from_str(&String::from_utf8_lossy(&word))
+    Method::parse(&String::from_utf8_lossy(&word))
 }
 
 #[cfg(test)]
@@ -145,7 +174,7 @@ mod tests {
     #[test]
     fn test_bad_request() {
         let buf = b"GET / HTTP/1.0\r\n\rX";
-        let (result, _, _) = got_request(buf, 0, buf.len(), ParseState::FirstWord);
+        let (_result, _, _) = got_request(buf, 0, buf.len(), ParseState::FirstWord);
         // After CRLF+CR, non-LF goes to Line state — not Bogus.
         // A truly bad request is one with CR/LF in FirstWord.
         let buf2 = b"\rGET / HTTP/1.0\r\n\r\n";
@@ -167,13 +196,22 @@ mod tests {
         let mut checked_idx = 0;
         let mut state = ParseState::FirstWord;
         for i in 0..buf.len() {
-            let (result, new_checked, new_state) = got_request(buf, checked_idx, i + 1, state.clone());
+            let (result, new_checked, new_state) = got_request(buf, checked_idx, i + 1, state);
             checked_idx = new_checked;
             state = new_state;
             if i < buf.len() - 1 {
-                assert_eq!(result, GotRequest::NoRequest, "should not complete at byte {}", i);
+                assert_eq!(
+                    result,
+                    GotRequest::NoRequest,
+                    "should not complete at byte {}",
+                    i
+                );
             } else {
-                assert_eq!(result, GotRequest::GotRequest, "should complete at last byte");
+                assert_eq!(
+                    result,
+                    GotRequest::GotRequest,
+                    "should complete at last byte"
+                );
             }
         }
     }

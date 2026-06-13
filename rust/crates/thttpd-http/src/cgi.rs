@@ -45,16 +45,22 @@ pub fn is_nph_script(script_path: &str) -> bool {
 /// Build the CGI environment variables in the exact order C's `make_envp()` uses.
 /// Order matters for legacy CGI scripts.
 pub fn build_envp(ctx: &CgiContext, script_path: &str, cgi_pattern: &str) -> Vec<(String, String)> {
-    let mut env = Vec::new();
-
-    // Order must match C's make_envp() at libhttpd.c:3002-3081
-    env.push(("PATH".to_string(), "/usr/local/bin:/usr/ucb:/bin:/usr/bin".to_string()));
-    env.push(("SERVER_SOFTWARE".to_string(), ctx.server_software.clone()));
-    env.push(("SERVER_NAME".to_string(), ctx.server_name.clone()));
-    env.push(("GATEWAY_INTERFACE".to_string(), ctx.gateway_interface.clone()));
-    env.push(("SERVER_PROTOCOL".to_string(), ctx.server_protocol.clone()));
-    env.push(("SERVER_PORT".to_string(), ctx.server_port.to_string()));
-    env.push(("REQUEST_METHOD".to_string(), ctx.request_method.clone()));
+    // Order must match C's make_envp() at libhttpd.c:3002-3081.
+    let mut env = vec![
+        (
+            "PATH".to_string(),
+            "/usr/local/bin:/usr/ucb:/bin:/usr/bin".to_string(),
+        ),
+        ("SERVER_SOFTWARE".to_string(), ctx.server_software.clone()),
+        ("SERVER_NAME".to_string(), ctx.server_name.clone()),
+        (
+            "GATEWAY_INTERFACE".to_string(),
+            ctx.gateway_interface.clone(),
+        ),
+        ("SERVER_PROTOCOL".to_string(), ctx.server_protocol.clone()),
+        ("SERVER_PORT".to_string(), ctx.server_port.to_string()),
+        ("REQUEST_METHOD".to_string(), ctx.request_method.clone()),
+    ];
 
     if let Some(ref path_info) = ctx.path_info {
         env.push(("PATH_INFO".to_string(), path_info.clone()));
@@ -79,7 +85,15 @@ pub fn build_envp(ctx: &CgiContext, script_path: &str, cgi_pattern: &str) -> Vec
     }
 
     // HTTP_* headers in C's fixed order
-    let fixed_order = ["Referer", "User-Agent", "Accept", "Accept-Encoding", "Accept-Language", "Cookie", "Host"];
+    let fixed_order = [
+        "Referer",
+        "User-Agent",
+        "Accept",
+        "Accept-Encoding",
+        "Accept-Language",
+        "Cookie",
+        "Host",
+    ];
     for header in &fixed_order {
         if let Some(value) = ctx.http_headers.get(*header) {
             let env_key = format!("HTTP_{}", header.to_uppercase().replace('-', "_"));

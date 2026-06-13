@@ -47,9 +47,7 @@ pub fn normalize_path(path: &str) -> Option<String> {
         match part {
             "" | "." => {}
             ".." => {
-                if components.pop().is_none() {
-                    return None; // traversal above root
-                }
+                components.pop()?; // traversal above root
             }
             _ => {
                 components.push(part);

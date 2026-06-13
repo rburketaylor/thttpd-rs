@@ -7,9 +7,9 @@
 //! - `Token(CONN_BASE + slab_key)` = connection at slab index
 
 pub use mio::{
+    Events, Interest, Poll, Registry, Token,
     event::Event,
     net::{TcpListener, TcpStream},
-    Events, Interest, Poll, Registry, Token,
 };
 
 /// Token for the IPv6 listen socket.

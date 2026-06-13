@@ -78,7 +78,7 @@ pub fn generate_listing(dir: &Path, url_path: &str) -> std::io::Result<Vec<u8>> 
         #[cfg(unix)]
         let nlink = {
             use std::os::unix::fs::MetadataExt;
-            lstat.nlink() as u64
+            lstat.nlink()
         };
         #[cfg(not(unix))]
         let nlink: u64 = 1;
@@ -189,8 +189,7 @@ fn format_ls_time(secs: u64) -> String {
     let (year, month, day) = days_to_ymd(days_since_epoch);
 
     let month_names = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ];
     let month_str = month_names.get(month - 1).unwrap_or(&"???");
 

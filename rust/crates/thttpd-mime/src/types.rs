@@ -8,8 +8,9 @@ use std::path::Path;
 /// MIME type lookup result. Mirrors C's `figure_mime()`:
 /// - `type` is the Content-Type (e.g. "text/html", "application/x-tar")
 /// - `encoding` is the Content-Encoding (e.g. "x-gzip", "")
+///
 /// For chained encodings like .tar.gz, the encoding includes the inner extension:
-/// .tar.gz → Content-Encoding: x-gzip, Content-Type: application/x-tar
+/// .tar.gz -> Content-Encoding: x-gzip, Content-Type: application/x-tar
 pub struct MimeInfo {
     pub mime_type: &'static str,
     pub encoding: Option<&'static str>,
@@ -36,7 +37,10 @@ pub fn figure_mime(filename: &str) -> MimeInfo {
         .unwrap_or_default();
 
     if components.is_empty() {
-        return MimeInfo { mime_type, encoding };
+        return MimeInfo {
+            mime_type,
+            encoding,
+        };
     }
 
     // The first element before any dot is the name, not an extension.
@@ -45,7 +49,10 @@ pub fn figure_mime(filename: &str) -> MimeInfo {
         components.split_off(1)
     } else {
         // No extension at all
-        return MimeInfo { mime_type, encoding };
+        return MimeInfo {
+            mime_type,
+            encoding,
+        };
     };
 
     // Walk extensions in REVERSE order (rightmost first).
@@ -84,7 +91,10 @@ pub fn figure_mime(filename: &str) -> MimeInfo {
         encoding = Some(match_leak(&combined));
     }
 
-    MimeInfo { mime_type, encoding }
+    MimeInfo {
+        mime_type,
+        encoding,
+    }
 }
 
 /// Look up an extension in the encodings table.

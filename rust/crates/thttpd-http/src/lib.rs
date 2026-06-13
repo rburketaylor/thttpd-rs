@@ -1,11 +1,11 @@
 //! HTTP protocol library for thttpd.
 //! Translates `legacy/src/libhttpd.c` and `legacy/src/libhttpd.h`.
 
+pub mod auth;
 pub mod cgi;
 pub mod conn;
 pub mod dirlist;
 pub mod error;
-pub mod auth;
 pub mod method;
 pub mod parse;
 pub mod parse_state;

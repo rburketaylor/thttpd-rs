@@ -11,7 +11,7 @@ pub enum Method {
 
 impl Method {
     /// Parse a method from its string representation.
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse(s: &str) -> Self {
         match s {
             "GET" => Method::Get,
             "HEAD" => Method::Head,

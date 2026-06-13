@@ -2,8 +2,8 @@
 //! Replaces C's hash-of-sorted-lists with `BinaryHeap<Reverse<TimerEntry>>`.
 //! Lazy cancellation via `cancelled` flag.
 
-use std::collections::{BinaryHeap, HashSet};
 use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashSet};
 use std::time::{Duration, Instant};
 
 /// Unique timer identifier.
@@ -105,7 +105,11 @@ impl TimerWheel {
     /// This cancels the old timer and creates a new one.
     pub fn reset(&mut self, id: TimerId, delay: Duration) -> Option<TimerId> {
         // Find the old timer to get its period, then cancel and re-create
-        let period = self.heap.iter().find(|e| e.0.id == id).and_then(|e| e.0.period);
+        let period = self
+            .heap
+            .iter()
+            .find(|e| e.0.id == id)
+            .and_then(|e| e.0.period);
         self.cancel(id);
         let new_id = TimerId(self.next_id);
         self.next_id += 1;
@@ -161,7 +165,7 @@ impl TimerWheel {
 
         // Clean up cancelled entries at the top
         loop {
-            let is_cancelled = self.heap.peek().map_or(false, |e| self.is_cancelled(e.0.id));
+            let is_cancelled = self.heap.peek().is_some_and(|e| self.is_cancelled(e.0.id));
             if !is_cancelled {
                 break;
             }
@@ -205,9 +209,12 @@ mod tests {
         let mut wheel = TimerWheel::new();
         let fired = Arc::new(Mutex::new(false));
         let fired_clone = fired.clone();
-        wheel.create(Duration::from_millis(1), Box::new(move |_| {
-            *fired_clone.lock().unwrap() = true;
-        }));
+        wheel.create(
+            Duration::from_millis(1),
+            Box::new(move |_| {
+                *fired_clone.lock().unwrap() = true;
+            }),
+        );
         std::thread::sleep(Duration::from_millis(10));
         let mut ctx = TimerCtx;
         wheel.run(&mut ctx);
@@ -219,9 +226,12 @@ mod tests {
         let mut wheel = TimerWheel::new();
         let fired = Arc::new(Mutex::new(false));
         let fired_clone = fired.clone();
-        let id = wheel.create(Duration::from_millis(1), Box::new(move |_| {
-            *fired_clone.lock().unwrap() = true;
-        }));
+        let id = wheel.create(
+            Duration::from_millis(1),
+            Box::new(move |_| {
+                *fired_clone.lock().unwrap() = true;
+            }),
+        );
         wheel.cancel(id);
         std::thread::sleep(Duration::from_millis(10));
         let mut ctx = TimerCtx;
@@ -242,9 +252,12 @@ mod tests {
         let mut wheel = TimerWheel::new();
         let count = Arc::new(Mutex::new(0));
         let count_clone = count.clone();
-        wheel.create_periodic(Duration::from_millis(1), Box::new(move |_| {
-            *count_clone.lock().unwrap() += 1;
-        }));
+        wheel.create_periodic(
+            Duration::from_millis(1),
+            Box::new(move |_| {
+                *count_clone.lock().unwrap() += 1;
+            }),
+        );
         std::thread::sleep(Duration::from_millis(10));
         let mut ctx = TimerCtx;
         wheel.run(&mut ctx);

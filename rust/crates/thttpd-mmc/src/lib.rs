@@ -65,7 +65,8 @@ impl MmapCache {
     /// Map a file into memory, returning a reference-counted handle.
     /// If the file is already cached and unchanged, returns the existing mapping.
     pub fn map(&mut self, path: &Path) -> Result<Rc<Mmap>, MmapError> {
-        let file = File::open(path).map_err(|_| MmapError::FileNotFound(path.display().to_string()))?;
+        let file =
+            File::open(path).map_err(|_| MmapError::FileNotFound(path.display().to_string()))?;
         let metadata = file.metadata()?;
 
         #[cfg(unix)]
@@ -84,7 +85,10 @@ impl MmapCache {
             use std::hash::{Hash, Hasher};
             let mut hasher = DefaultHasher::new();
             path.hash(&mut hasher);
-            FileKey { dev: 0, ino: hasher.finish() }
+            FileKey {
+                dev: 0,
+                ino: hasher.finish(),
+            }
         };
 
         // Check cache for existing mapping
@@ -98,11 +102,14 @@ impl MmapCache {
         // thttpd only serves static files; concurrent modification is not expected.
         let mmap = unsafe { Mmap::map(&file)? };
         let size = metadata.len();
-        self.entries.insert(key, CacheEntry {
-            mmap: Rc::new(mmap),
-            last_used: Instant::now(),
-            size,
-        });
+        self.entries.insert(
+            key,
+            CacheEntry {
+                mmap: Rc::new(mmap),
+                last_used: Instant::now(),
+                size,
+            },
+        );
 
         Ok(Rc::clone(&self.entries[&key].mmap))
     }
@@ -133,9 +140,9 @@ impl MmapCache {
         // Adaptive expiry: if cache is too large, reduce expire_age
         let total_size: u64 = self.entries.values().map(|e| e.size).sum();
         if total_size > self.max_size as u64 {
-            self.expire_age = self.expire_age / 2;
+            self.expire_age /= 2;
         } else if self.expire_age < Duration::from_secs(120) {
-            self.expire_age = self.expire_age * 2;
+            self.expire_age *= 2;
         }
     }
 }

@@ -72,7 +72,13 @@ mod tests {
     #[test]
     fn test_status_codes() {
         assert_eq!(HttpError::BadRequest.status_code(), 400);
-        assert_eq!(HttpError::Unauthorized { realm: "test".into() }.status_code(), 401);
+        assert_eq!(
+            HttpError::Unauthorized {
+                realm: "test".into()
+            }
+            .status_code(),
+            401
+        );
         assert_eq!(HttpError::Forbidden.status_code(), 403);
         assert_eq!(HttpError::NotFound.status_code(), 404);
         assert_eq!(HttpError::RequestTimeout.status_code(), 408);

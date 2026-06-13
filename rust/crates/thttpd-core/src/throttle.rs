@@ -63,7 +63,9 @@ pub struct ThrottleTable {
 
 impl ThrottleTable {
     pub fn new() -> Self {
-        Self { entries: Vec::new() }
+        Self {
+            entries: Vec::new(),
+        }
     }
 
     /// Load throttle rules from a file. Matches C's `read_throttlefile`
@@ -80,8 +82,7 @@ impl ThrottleTable {
         let mut entries = Vec::new();
         for (idx, raw_line) in content.lines().enumerate() {
             // Trim trailing whitespace (C's "nuke trailing whitespace")
-            let line = raw_line
-                .trim_end_matches(|c: char| c == ' ' || c == '\t' || c == '\n' || c == '\r');
+            let line = raw_line.trim_end_matches([' ', '\t', '\n', '\r']);
 
             // Skip comments
             if line.contains('#') {
@@ -97,7 +98,8 @@ impl ThrottleTable {
                 } else {
                     eprintln!(
                         "thttpd: unparsable line {} in throttlefile: {:?}",
-                        idx + 1, raw_line
+                        idx + 1,
+                        raw_line
                     );
                 }
                 continue;
@@ -110,7 +112,8 @@ impl ThrottleTable {
             } else {
                 eprintln!(
                     "thttpd: unparsable line {} in throttlefile: {:?}",
-                    idx + 1, raw_line
+                    idx + 1,
+                    raw_line
                 );
             }
         }
@@ -207,7 +210,11 @@ fn parse_line(line: &str) -> Option<ThrottleEntry> {
         return None;
     }
 
-    Some(ThrottleEntry::new(pattern.to_string(), max_limit, min_limit))
+    Some(ThrottleEntry::new(
+        pattern.to_string(),
+        max_limit,
+        min_limit,
+    ))
 }
 
 #[cfg(test)]
@@ -279,7 +286,7 @@ mod tests {
         let path = dir.path().join("throttle.conf");
         let mut f = std::fs::File::create(&path).unwrap();
         writeln!(f, "# This is a comment").unwrap();
-        writeln!(f, "").unwrap();
+        writeln!(f).unwrap();
         writeln!(f, "*.html 1000000").unwrap();
         writeln!(f, "# Another comment").unwrap();
         writeln!(f, "*.png 500-5000").unwrap();
@@ -296,7 +303,9 @@ mod tests {
     #[test]
     fn test_check_throttles_match() {
         let entry = ThrottleEntry::new("*.html".into(), 1000, 0);
-        let table = ThrottleTable { entries: vec![entry] };
+        let table = ThrottleTable {
+            entries: vec![entry],
+        };
         let (max, _min) = table.check_throttles("page.html");
         assert_eq!(max, 1000);
     }
@@ -304,7 +313,9 @@ mod tests {
     #[test]
     fn test_check_throttles_no_match() {
         let entry = ThrottleEntry::new("*.html".into(), 1000, 0);
-        let table = ThrottleTable { entries: vec![entry] };
+        let table = ThrottleTable {
+            entries: vec![entry],
+        };
         let (max, min) = table.check_throttles("page.png");
         assert_eq!(max, THROTTLE_NOLIMIT);
         assert_eq!(min, THROTTLE_NOLIMIT);
