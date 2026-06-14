@@ -16,8 +16,8 @@ foundation everything below builds on:
 - **Knowledge graph** under `knowledge/` — every C file mapped to its Rust
   equivalent with `file:line` evidence
 - **CI** — build + unit tests + harness + differential + knowledge validation
-- **JOURNEY.md** — the actual repair-loop narrative (the doc that proves
-  behavioral gates, not structural ones, were used)
+- **JOURNEY.md** — the migration case study (the doc that proves behavioral
+  gates, not structural ones, were used)
 
 This foundation is genuinely unusual. Most "Rust port" projects stop at "it
 compiles and the unit tests pass." The differential suite compares request

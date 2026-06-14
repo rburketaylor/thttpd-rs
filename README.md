@@ -91,7 +91,7 @@ pipeline/              legacy build, capture, report, and validation scripts
 knowledge/             structured C-to-Rust migration records
 docs/                  playbook, risks, security notes, and demo guide
 scripts/demo.sh         short interview demonstration
-JOURNEY.md              development and repair-loop narrative
+JOURNEY.md              migration case study and lessons
 Makefile                one-command quality and verification gates
 ```
 

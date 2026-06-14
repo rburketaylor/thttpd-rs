@@ -1,172 +1,75 @@
-# Migration Journey Log
+# Case Study: Porting thttpd from C to Rust
 
-## The Discovery (2026-06-08)
+This is a record of what was learned porting `sthttpd 2.27.0` from C to Rust and proving the port against the original binary. It is not a progress log. The phases, dates, and checkmarks that an implementation diary would carry have been left out on purpose; what remains is the set of methodological lessons the project actually turned on, each grounded in something concrete that happened during the migration.
 
-Ran the validation artifact after the initial rpiv-pi pipeline (discover → research → design → plan → implement → validate). All 22 phases reported "fully implemented." But running the tests told a different story:
+The short version: a port that its own plan called "fully implemented" did not respond to requests, and the path from there to a server characterized by 105 side-by-side differential scenarios is the part worth reading. The README covers what the project is and how to run it; this document covers why the method matters.
 
-- **48 Rust unit tests pass** — the building blocks work in isolation
-- **80 harness tests error at fixture setup** — the C binary was never compiled
-- **Event loop is a skeleton** — placeholder comments where dispatch logic should be
-- **Pipeline scripts print "placeholder"** — golden capture never ran
+## Context
 
-### Root Cause
+`thttpd` is a small, single-threaded, event-driven HTTP server written in C roughly three decades ago. The goal was a Rust port with provable parity, not a redesign. The approach was fixed before any port code was written:
+keep the C binary in the tree as an executable specification, capture representative behavior before changing anything, port behind clear module boundaries, run old and new implementations side by side, and track normalization and known deviations explicitly. Everything that follows is a consequence of that approach, or a correction forced by violating it.
 
-The plan's success criteria were **structural** ("file exists, compiles, test collected") not **behavioral** ("server responds to GET / with 200"). The implement skill met the letter of every exit gate. The validation phase caught the gaps after the fact.
+## "Implemented" is not a behavior
 
-This is the classic AI-assisted implementation trap: plan gates on what's easy to check mechanically, not on what actually matters.
+The first attempt at the port ran a multi-phase pipeline (discover, research, design, plan, implement, validate) and reported all 22 implementation phases as complete. The gates were structural: a file existed, it compiled, a test was collected. The plan's exit criteria had been written to be mechanically checkable, and the implementation met the letter of every one.
 
-### The Fix Plan
+Running the result told a different story. Rust unit tests passed, but the server did not answer requests. The event loop dispatched nothing. The harness errored at fixture setup because the C reference binary had never been compiled. The golden-capture scripts printed "placeholder." The implementation had satisfied the gates and built nothing that worked.
 
-Six phases, each gated on observable behavior:
+The fix was not more implementation; it was better gates. Every subsequent gate was restated as an observable behavior: `curl localhost:19997/index.html` returns the file body, the C binary serves files on port 19998, the harness sends a real HTTP request and asserts on a real response, the golden capture writes `baseline.json`. Structural completion is cheap to verify and meaningless; behavioral completion is the only thing that matters.
 
-- **A:** Wire up event loop dispatch → `curl localhost:8080` returns a response
-- **B:** Build C binary → `legacy/src/thttpd` serves files
-- **C:** Populate harness tests → real HTTP requests, real assertions
-- **D:** Implement pipeline scripts → `baseline.json` gets captured
-- **E:** Differential verification → 0 failures C vs Rust
-- **F:** Update README with the real story
+This is the central lesson of the project, and it shaped every section that follows.
 
----
+## The legacy binary is the specification
 
-## Phase A: Event Loop Dispatch — ✅ Complete
+Behavior was captured from the C binary before any Rust dispatch code was written. Forty-five representative requests went in; forty-five response records came out, each with status line, header block, and body. Those captured records became the contract. There was never a meeting about what "correct" meant, because correctness had already been defined as "whatever the C binary did."
 
-Rewrote `eventloop.rs` from skeleton to full dispatch. Added connection table (`slab::Slab<ConnSlot>`), listener storage, and the full event chain:
+This is the only reason the later repair work was tractable. Every disputed behavior, from the byte order of a directory listing to whether a malformed request returns 400 or 501, was settled by replaying the request against the reference and reading the response. Without the golden master, each of those questions would have become a design discussion.
 
-- **handle_accept()** — Accept TCP, create ConnSlot(Reading), register with mio
-- **handle_read()** — Read into HttpConn.read_buf, run got_request() FSM
-- **process_request()** — Parse method/URL, normalize path, check CGI patterns, dispatch
-- **serve_static()** — mmap cache, directory listing, proper headers
-- **dispatch_cgi()** — Build env, execute, parse output, handle NPH
-- **handle_send()** — Write response bytes, reregister for partial writes
-- **handle_lingering()** — Drain socket before close (prevent RST)
+## Differential testing at scale
 
-**Gate:** `curl localhost:19997/index.html` → `Hello from thttpd-rs` ✅
+Once the harness existed, adding a test cost one request. A single raw-socket HTTP request was replayed against both servers, and the comparison engine produced an eight-field verdict automatically. The investment was front-loaded into the harness; after that, coverage grew cheaply.
 
-## Phase B: Build C Reference Binary — ✅ Complete
+The first full differential run passed 2 of 45 scenarios. The 43 failures were not random; they fell into categories, and each category closed systematically:
 
-autotools `make` failed on modern GCC: `sigset` is an implicit function declaration, now a hard error. Workaround: manual gcc invocation with `-Wno-implicit-function-declaration`. Updated `pipeline/build_legacy.sh`.
+- Missing response headers. The C server returned seven headers; the Rust server returned four. `Last-Modified`, `Accept-Ranges`, `Connection: close`, and the `charset=iso-8859-1` parameter on `Content-Type` were all absent.
+- Missing features. `If-Modified-Since` did not return 304. `Range` did not return 206. `HEAD` included a body. HTTP/0.9 requests got a full header block instead of a raw response. Unknown methods did not return 501.
+- Security gaps. Symbolic links were not checked against the web root, so a symlink could escape. Directory traversal was not detected. A permission-denied file was reported as not found rather than forbidden.
+- CGI output. Status-header extraction, NPH-script handling, and the header/body split in CGI output were all wrong. This category also produced the `dual_server_process` session fixture that runs both servers side by side for the rest of the suite.
+- Nondeterminism. `Date` headers, minor `Server` differences, and dynamically allocated ports varied between processes. Rather than mark these as matches, the comparison engine grew explicit, documented normalizers, so that only behavioral differences can fail a scenario.
 
-**Gate:** `curl localhost:19998/index.html` → `Hello from C thttpd` ✅
+After this loop, 71 of 71 fast differential scenarios passed. The remaining 9 were not failures of comparison; they were failures of the Rust server itself, and they had been deferred because two of them crashed the process.
 
-**Lesson:** 30-year-old C code doesn't compile cleanly on modern GCC.
+## Where the bugs hid: three parser edge cases
 
-## Phase C: Populate Harness Tests — ✅ Complete
+The last nine scenarios were closed in a single focused session. Three bugs were found and fixed, and each is worth reading closely because it is the kind of bug that unit tests do not catch and differential tests do.
 
-Replaced all 80 `pass` stubs with real socket-level HTTP requests using raw `socket` module — no external libraries, which lets us test malformed requests that HTTP clients would refuse to send.
+**The CGI stdin deadlock.** When a request carried no `Content-Length` header (notably `Transfer-Encoding: chunked`), the server never closed the stdin pipe to the CGI child. The child's `cat` blocked reading stdin; the server blocked reading the child's stdout. This is a textbook pipe deadlock. The fix was to always take and drop the stdin pipe, writing body bytes into it only when a body was actually present. (`cgi.rs`)
 
-Rewrote `conftest.py` with `http_request()` / `parse_response()` helpers, expanded `www_root` fixture (binary files, large files, symlinks, subdirectories, 8 CGI scripts), and added port-readiness polling.
+**Negative `Content-Length`.** The header value `"-1"` parsed as `Some(-1)`, which was then cast to `usize` and wrapped to `MAX_USIZE`. The C server's `atol()` also returns `-1` for the string `"-1"`, but C treats `contentlength == -1` as a sentinel meaning "unspecified," whereas the Rust port had silently allocated an effectively unbounded body. The fix was to filter negative values to `None`. (`eventloop.rs`)
 
-**Gate:** `pytest harness/tests/ -v` → **80 passed, 0 failed** ✅
+**Incremental FSM state reset.** The request parser reset to its initial `FirstWord` state on every call instead of resuming from the stored `parse_state`. For a normal request, where the full request arrives in one read, this is invisible. For a slow-loris request, where bytes trickle in one at a time, the parser could never accumulate enough state to recognize a complete request line. The C server handled this naturally because `hc->checked_state` lives on the connection struct and persists across reads. The Rust port had to be taught the same discipline: the stored `parse_state` is now passed in as the initial state on every call. (`parse.rs`)
 
-## Phase D: Pipeline Scripts — ✅ Complete
+The shared shape of these three bugs is the lesson. They are all edge cases in how input is delivered or sized: no Content-Length, negative Content-Length, byte-by-byte delivery. None of them surfaces in a unit test that constructs a well-formed request and hands it over in one piece. All of them surface immediately under a differential harness that replays the same bytes against an implementation that got them right thirty years ago.
 
-Implemented all pipeline scripts: `run_golden_capture.py` (starts C binary, captures responses), `run_differential.py` (replays against Rust, 8-field diff), `generate_report.py` (HTML diff report).
+## The oracle needs its own tests
 
-**Gate:** `run_golden_capture.py` captured 45 responses ✅
+The differential engine became part of the trusted computing base, and that created a second-order risk: if the comparator was wrong, every passing scenario was suspect. It was wrong. The normalized comparison profile used to mark `body_sha256` as matched unconditionally, meaning two responses with completely different bodies could pass a scenario as long as their headers lined up.
 
----
+That bug is fixed. Normalized mode now hashes the normalized body and fails on any remaining body mutation. Exact and normalized profiles are explicit and documented field by field, and 63 comparator unit tests run in CI alongside the differential scenarios. The lesson is direct: a tool whose only job is to detect drift has to be tested for drift in itself.
 
-## Phase E: Differential Verification — ✅ Complete
+## Operational details are not a polish phase
 
-First differential run: **2/45 passed, 43 failed**. The pipeline was doing its job — it caught every gap.
+A port that gets every request right but reorders privileged operations is not actually a port. Several behaviors that are easy to dismiss as operational housekeeping are observable, and someone depends on each of them:
 
-### The Repair Loop
+- Listener sockets bind after `chroot` and before `setuid`, matching the legacy ordering. Binding after dropping privileges fails; binding before chroot exposes the wrong filesystem.
+- The `-C` flag parses supported legacy config directives and rejects unknown or unsupported ones with an actionable error rather than silently ignoring them.
+- The configured pidfile is written on successful startup.
+- An unreadable `.htpasswd` returns the legacy 403, not a 401 that the legacy server never produced.
 
-The failures fell into clear categories, each fixed systematically:
+These shipped inside the migration, not in a deferred polish phase, because they are part of the contract the reference implementation established.
 
-**Round 1 — Missing response headers** (~20 failures)
-C returns 7 headers; Rust returned 4. Added `Last-Modified`, `Accept-Ranges`, `Connection: close`, and `charset=iso-8859-1` in Content-Type.
+## Where it stands
 
-**Round 2 — Missing features** (~10 failures)
-- `If-Modified-Since` → 304 Not Modified
-- `Range` requests → 206 Partial Content
-- `HEAD` method body suppression
-- HTTP/0.9 raw response (no headers)
-- Invalid method → 501 Not Implemented
+One hundred and five differential scenarios now characterize externally observable request behavior against the C reference, with normalization documented field by field. The full test inventory, build prerequisites, and the one-command gate (`make verify`) are in the README.
 
-**Round 3 — Security gaps** (~5 failures)
-- Symlink escape prevention (canonical path check against web root)
-- Directory traversal detection
-- Permission denied vs not found distinction
-
-**Round 4 — CGI** (~5 failures)
-CGI output parsing: Status header extraction, NPH script handling, header/body split. Also created the `dual_server_process` session-scoped fixture for side-by-side comparison.
-
-**Round 5 — Normalization** (~3 failures)
-Added response normalizers to `diff_engine.py` for timing-sensitive fields (Date, Server header minor differences) so only behavioral differences fail.
-
-### Result After Repair Loop
-
-**71/71 fast differential tests passing.** The remaining 9 tests fell into two deferred categories:
-
-1. **2 crashing bugs** — chunked transfer encoding and negative Content-Length crashed the Rust server
-2. **7 slow-lifecycle tests** — timeout/keepalive tests that each take 30-60s, were deselected to avoid cascading failures from the crashes
-
----
-
-## Phase F: Final Fixes — ✅ Complete (2026-06-10)
-
-The last 9 tests were closed out in a single focused session. Three bugs fixed:
-
-### Bug 1: CGI stdin deadlock (chunked transfer encoding)
-When no `Content-Length` header was present (e.g. `Transfer-Encoding: chunked`), the stdin pipe to the CGI child was never closed. The child's `cat` blocked reading stdin while the server blocked reading stdout — a classic pipe deadlock.
-
-**Fix:** Always take and drop stdin pipe, writing body data only when present. (`cgi.rs`)
-
-### Bug 2: Negative Content-Length
-`parse::<i64>().ok()` accepted `"-1"` as `Some(-1)`, then `len as usize` wrapped to `MAX_USIZE`. C's `atol()` returns -1 for the string "-1", and `contentlength == -1` is the sentinel for "unspecified."
-
-**Fix:** Filter negative values to `None`. (`eventloop.rs`)
-
-### Bug 3: Incremental FSM parser state reset (slow-loris)
-`got_request()` reset to `FirstWord` on every call instead of resuming from the stored `parse_state`. When data arrived byte-by-byte (slow-loris pattern), the parser could never accumulate enough state to recognize a complete request. C's `hc->checked_state` persists across reads.
-
-**Fix:** Pass stored `parse_state` as `initial_state` parameter. (`parse.rs`)
-
-### Final Test Results
-
-| Suite | Result |
-|---|---|
-| Differential tests (C vs Rust) | **105/105** ✅ |
-| C-only harness tests | **80/80** ✅ |
-| Rust unit tests | **95/95** ✅ |
-| Comparator unit tests | **63/63** ✅ |
-| Pipeline validation | **PASS** ✅ |
-| **Total** | **343/343** |
-
-All 7 previously deferred slow-lifecycle tests now pass: connection timeout, slow loris, idle connection cleanup, multiple connections, keep-alive, pipelined requests, and throttle pause/resume.
-
----
-
-## Lessons Learned
-
-1. **Behavioral gates beat structural gates.** "File exists and compiles" is not "server returns 200." Every phase gate should test observable behavior.
-
-2. **The golden master is the contract.** Capturing the C binary's exact behavior *before* writing Rust code meant there was never ambiguity about what "correct" meant.
-
-3. **Differential testing scales.** Once the harness was built, adding a new test was trivial — write one request, get automatic C vs Rust comparison.
-
-4. **Edge cases hide in parsers.** The three final bugs were all in edge-case handling (no Content-Length, negative Content-Length, byte-by-byte delivery) — exactly the kind of thing unit tests miss and differential tests catch.
-
-5. **Incremental parsing is hard.** The FSM state bug was the subtlest — the parser worked for normal requests (all data arrives at once) and only failed when data trickled in. The C code handled this naturally because its state was stored on the connection struct. The Rust version needed the same discipline.
-
----
-
-## Phase G: Verification and Operational Honesty — Complete (2026-06-13)
-
-The comparator itself became part of the trusted computing base. Normalized
-mode previously marked `body_sha256` as matched unconditionally; it now hashes
-the normalized body and fails on every remaining mutation. Exact and normalized
-profiles are explicit, and 63 comparator tests run in CI.
-
-This phase also added legacy config parsing, corrected chroot -> bind -> setuid
-ordering, wrote configured pidfiles, restored the legacy 403 result for an
-unreadable `.htpasswd`, and established `make verify` as the complete gate.
-
-## Current Verdict
-
-Request behavior is strongly characterized by 105 C-vs-Rust scenarios, with
-normalization documented field by field. The server is not yet described as a
-full operational drop-in replacement: throttle enforcement, daemonization,
-request logging, CGI resource controls, IPv6, and several CLI/config surfaces
-remain in `docs/KNOWN_DEVIATIONS.md`.
+The server is not described as a full operational drop-in replacement. Throttle enforcement, daemonization, request logging, CGI resource controls, IPv6 listeners, and several CLI and config surfaces are not yet at parity, and each is recorded with its legacy behavior, current Rust behavior, impact, and disposition in `docs/KNOWN_DEVIATIONS.md`. An explicit list of known gaps is more useful than an unqualified compatibility claim; it is what allows the 105 passing scenarios to mean what they appear to mean.
