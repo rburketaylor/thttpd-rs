@@ -9,6 +9,7 @@ members = [
     "crates/thttpd-match",
     "crates/thttpd-tdate",
     "crates/thttpd-mime",
+    "crates/thttpd-migrate",
 ]
 
 [workspace.package]

@@ -1,0 +1,41 @@
+# thttpd-migrate example configuration.
+# Copy to /etc/thttpd-migrate.toml and edit.
+
+listen = "127.0.0.1:8080"
+log_level = "info"
+state_path = "/var/run/thttpd-migrate/state.json"
+control_socket = "/var/run/thttpd-migrate/control.sock"
+
+[metrics]
+listen = "127.0.0.1:9100"
+path = "/metrics"
+
+[shadow]
+max_body_bytes = 1048576
+
+[backends.c-thttpd]
+address = "127.0.0.1:8081"
+weight = 95                # 95% of traffic in active-active
+health_path = "/"          # thttpd has no built-in /__healthz
+
+[backends.rust-thttpd]
+address = "127.0.0.1:8082"
+weight = 5                 # 5% canary
+health_path = "/"
+
+[routing]
+mode = "active-active"     # | "shadow" | "canary"
+primary_backend = "c-thttpd"      # required only for shadow mode
+shadow_backend = "rust-thttpd"
+exclude_paths = ["/internal/*", "/metrics"]   # never proxied, returned 404
+
+[health]
+interval_ms = 1000
+timeout_ms = 500
+failure_threshold = 3      # consecutive failures → mark unhealthy
+success_threshold = 2      # consecutive successes → mark healthy
+
+[circuit_breaker]
+error_rate_threshold = 0.5 # 50% errors in window → open circuit
+window_secs = 30
+min_requests = 20          # don't trip below this volume
