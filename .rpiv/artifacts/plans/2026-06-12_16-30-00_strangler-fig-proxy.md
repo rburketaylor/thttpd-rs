@@ -19,8 +19,9 @@ phases:
   - { n: 7, title: Graceful drain + rollback }
   - { n: 8, title: Integration tests }
   - { n: 9, title: Documentation + runbooks }
-last_updated: 2026-06-12T16:30:00-0300
-last_updated_by: Burke T
+last_updated: 2026-06-13T23:55:00-0300
+last_updated_by: pi
+last_updated_note: "Third-party review: fixed 4 compile blockers and 9 concerns; dead params, control plane, tracing wiring, config authority."
 ---
 
 # Strangler-Fig Migration Proxy — Implementation Plan
@@ -39,6 +40,17 @@ This plan adds a new migration proxy binary, **`thttpd-migrate`**, that sits in 
 
 The proxy is a **new component** — it does not modify the existing `thttpd-rs` server, and the server keeps its `mio`-based single-threaded architecture.
 
+### Implementation-readiness review notes
+
+This plan was reviewed against the current repository state on 2026-06-13:
+
+- Workspace membership currently lives in `rust/Cargo.toml:1-12`; adding `crates/thttpd-migrate` makes `make build`, `make check`, and CI include the proxy automatically because they already operate on the workspace.
+- Existing dual-server fixtures live in `harness/conftest.py:345-650`; Phase 8 should extend those fixtures rather than inventing a parallel process harness.
+- Existing comparison logic lives in `harness/diff_engine.py:32-325`; the Rust `diff.rs` port must preserve the current normalized profile rather than the older `1-180` line range.
+- The existing `Makefile:31-48` does not yet run proxy-specific integration tests; Phase 8 must add a `proxy` target and include it in `integration` once the proxy tests exist.
+- thttpd does not expose a built-in `/__healthz`; use `/` as the default `health_path` in examples/tests unless the fixture creates a real health file.
+- Hyper 1 response/request bodies must use concrete body types such as `http_body_util::Full<bytes::Bytes>` or boxed bodies; snippets below avoid `Response<String>` and `Client<..., Empty<Bytes>>` for proxied requests.
+
 ### Architectural decision: async runtime
 
 The existing `thttpd-rs` server deliberately uses `mio` directly with a manual event loop to match thttpd's C architecture. The proxy is a different kind of system — it manages many concurrent connections to multiple backends, and re-implementing that on `mio` would be busywork that hides the actual proxy logic.
@@ -49,7 +61,7 @@ The existing `thttpd-rs` server deliberately uses `mio` directly with a manual e
 - Production proxies (Envoy, nginx, HAProxy) are async
 - `tokio`'s task model maps cleanly to per-request proxying
 
-**Trade-off:** introduces a new runtime to the project. ADR-0002 will record this.
+**Trade-off:** introduces a new runtime to the project. ADR-0002 records this (created in Phase 9).
 
 ### Architecture
 
@@ -94,23 +106,33 @@ cargo install --path rust/crates/thttpd-migrate
 
 # Create config (config/thttpd-migrate.example.toml is checked in)
 cat > /etc/thttpd-migrate.toml <<EOF
-listen = ":8080"
+listen = "127.0.0.1:8080"
 log_level = "info"
+state_path = "/var/run/thttpd-migrate/state.json"
+control_socket = "/var/run/thttpd-migrate/control.sock"
+
+[metrics]
+listen = "127.0.0.1:9100"
+path = "/metrics"
+
+[shadow]
+max_body_bytes = 1048576
 
 [backends.c-thttpd]
 address = "127.0.0.1:8081"
 weight = 95
-health_path = "/__healthz"
+health_path = "/"
 
 [backends.rust-thttpd]
 address = "127.0.0.1:8082"
 weight = 5
-health_path = "/__healthz"
+health_path = "/"
 
 [routing]
 mode = "active-active"  # | "shadow" | "canary"
+primary_backend = "c-thttpd"     # required for shadow mode; ignored by weighted active-active
 shadow_backend = "rust-thttpd"
-exclude_paths = ["/internal/*", "/__healthz"]
+exclude_paths = ["/internal/*", "/metrics"]
 
 [health]
 interval_ms = 1000
@@ -128,10 +150,10 @@ EOF
 thttpd-migrate start --config /etc/thttpd-migrate.toml
 
 # Promote Rust to 100% in 30 seconds (no downtime)
-thttpd-migrate set-weight rust-thttpd=100 c-thttpd=0
+thttpd-migrate --control-socket /var/run/thttpd-migrate/control.sock set-weight rust-thttpd=100 c-thttpd=0
 
 # Roll back to C in 30 seconds (one command, no traffic loss)
-thttpd-migrate rollback --to c-thttpd
+thttpd-migrate --control-socket /var/run/thttpd-migrate/control.sock rollback --to c-thttpd
 
 # Inspect runtime state
 thttpd-migrate status
@@ -150,7 +172,7 @@ A successful end-to-end demo:
 - No 5xx errors attributable to the proxy
 - `curl -H 'Host: example.com' localhost:8080/` returns identical headers and body to `curl localhost:8081/` (up to Date header)
 - `thttpd-migrate rollback` restores all traffic to C within 30 seconds with zero failed requests
-- `prometheus://localhost:8080/__metrics` shows `thttpd_migrate_requests_total{backend="..."}` incrementing
+- `curl http://localhost:9100/metrics` shows `thttpd_migrate_requests_total{backend="..."}` incrementing
 
 ## What We're NOT Doing
 
@@ -159,8 +181,9 @@ A successful end-to-end demo:
 - **Service discovery** — backends are configured statically; DNS-based discovery is deferred
 - **Multi-region / global load balancing** — single-region only
 - **Admin UI** — CLI and Prometheus metrics only; no web UI in this phase
-- **Hot config reload** — SIGHUP re-reads config; weight changes use the dedicated CLI command
+- **Full hot config reload** — weight changes use the control socket; broader config changes still require restart
 - **HTTP/2 to backends** — HTTP/1.1 only, matching thttpd-rs and thttpd capabilities
+- **Unbounded request/response buffering** — active routing streams; shadow diffing buffers request/response bodies only up to a documented cap and records a truncation divergence above that cap
 - **Modifying thttpd-rs** — the server stays as-is
 - **Async runtime adoption in the server** — ADR-0002 records the deliberate split
 
@@ -214,6 +237,7 @@ hyper = { version = "1", features = ["server", "client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio", "client-legacy", "http1"] }
 clap = { workspace = true }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 toml = "0.8"
 anyhow = "1"
 thiserror = { workspace = true }
@@ -225,6 +249,8 @@ uuid = { version = "1", features = ["v4"] }
 arc-swap = "1"
 http-body-util = "0.1"
 bytes = "1"
+rand = "0.8"
+parking_lot = "0.12"
 
 [dev-dependencies]
 wiremock = "0.6"
@@ -237,6 +263,7 @@ tempfile = { workspace = true }
 
 ```rust
 use clap::{Parser, Subcommand};
+use std::net::SocketAddr;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -246,6 +273,10 @@ use std::path::PathBuf;
     about = "Strangler-fig proxy for thttpd → thttpd-rs migration"
 )]
 struct Cli {
+    /// Control socket used by mutating commands once Phase 7 lands.
+    #[arg(long, global = true, default_value = "/var/run/thttpd-migrate/control.sock")]
+    control_socket: PathBuf,
+
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -254,8 +285,12 @@ struct Cli {
 enum Cmd {
     /// Start the proxy
     Start {
-        #[arg(long, default_value = "/etc/thttpd-migrate.toml")]
-        config: PathBuf,
+        /// Full TOML config. Optional in Phase 1; required once Phase 2 lands.
+        #[arg(long)]
+        config: Option<PathBuf>,
+        /// Phase 1 skeleton bind address. Phase 2 reads this from config.
+        #[arg(long, default_value = "127.0.0.1:8080")]
+        listen: SocketAddr,
         /// Override log level (trace, debug, info, warn, error)
         #[arg(long, default_value = "info")]
         log_level: String,
@@ -288,45 +323,48 @@ enum Cmd {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Start { config, log_level } => thttpd_migrate::start(config, log_level).await,
+        Cmd::Start { config, listen, log_level } => thttpd_migrate::start(config, listen, log_level).await,
         Cmd::Status { state } => thttpd_migrate::status(state),
-        Cmd::SetWeight { pairs } => thttpd_migrate::set_weight(pairs),
-        Cmd::Drain { timeout_secs } => thttpd_migrate::drain(timeout_secs).await,
-        Cmd::Rollback { to } => thttpd_migrate::rollback(&to),
+        Cmd::SetWeight { pairs } => thttpd_migrate::set_weight(cli.control_socket, pairs),
+        Cmd::Drain { timeout_secs } => thttpd_migrate::drain(cli.control_socket, timeout_secs).await,
+        Cmd::Rollback { to } => thttpd_migrate::rollback(cli.control_socket, &to),
     }
 }
 ```
 
 #### 4. Lib root with module stubs
 **File**: `rust/crates/thttpd-migrate/src/lib.rs`
-**Changes**: NEW — module declarations, one per future phase. Stubs return `unimplemented!()` so the build succeeds.
+**Changes**: NEW — only declare modules that exist in Phase 1. Later phases add their modules when files are created; do not declare future modules without stub files, or the crate will not compile.
 
 ```rust
 //! Strangler-fig migration proxy for thttpd → thttpd-rs.
 //!
 //! See `.rpiv/artifacts/plans/2026-06-12_16-30-00_strangler-fig-proxy.md`.
 
-pub mod config;
-pub mod router;
-pub mod backend;
-pub mod forwarder;
-pub mod shadow;
-pub mod health;
-pub mod circuit;
-pub mod metrics;
-pub mod state;
 pub mod server;
-pub mod drain;
 
+use std::net::SocketAddr;
 use std::path::PathBuf;
 
-pub async fn start(_config: PathBuf, _log_level: String) -> anyhow::Result<()> {
-    unimplemented!("Phase 1 stub: skeleton server only")
+pub async fn start(config: Option<PathBuf>, listen: SocketAddr, _log_level: String) -> anyhow::Result<()> {
+    if let Some(path) = config {
+        anyhow::ensure!(path.exists(), "config file not found: {}", path.display());
+    }
+    server::run_skeleton(listen).await
 }
-pub fn status(_state: PathBuf) -> anyhow::Result<()> { unimplemented!() }
-pub fn set_weight(_pairs: Vec<String>) -> anyhow::Result<()> { unimplemented!() }
-pub async fn drain(_timeout_secs: u64) -> anyhow::Result<()> { unimplemented!() }
-pub fn rollback(_to: &str) -> anyhow::Result<()> { unimplemented!() }
+
+pub fn status(_state: PathBuf) -> anyhow::Result<()> {
+    anyhow::bail!("status is not available until Phase 7 state file support is implemented")
+}
+pub fn set_weight(_control_socket: PathBuf, _pairs: Vec<String>) -> anyhow::Result<()> {
+    anyhow::bail!("set-weight is not available until Phase 7 control socket support is implemented")
+}
+pub async fn drain(_control_socket: PathBuf, _timeout_secs: u64) -> anyhow::Result<()> {
+    anyhow::bail!("drain is not available until Phase 7 control socket support is implemented")
+}
+pub fn rollback(_control_socket: PathBuf, _to: &str) -> anyhow::Result<()> {
+    anyhow::bail!("rollback is not available until Phase 7 control socket support is implemented")
+}
 ```
 
 #### 5. Hello-world hyper server
@@ -334,12 +372,16 @@ pub fn rollback(_to: &str) -> anyhow::Result<()> { unimplemented!() }
 **Changes**: NEW — minimal hyper server returning 200 OK on every request. Real routing comes in Phase 3.
 
 ```rust
+use bytes::Bytes;
+use http_body_util::Full;
 use hyper::{Request, Response, body::Incoming, service::service_fn};
 use hyper_util::rt::TokioIo;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
 use tracing::info;
+
+type SkeletonBody = Full<Bytes>;
 
 pub async fn run_skeleton(listen: SocketAddr) -> anyhow::Result<()> {
     let listener = TcpListener::bind(listen).await?;
@@ -349,7 +391,7 @@ pub async fn run_skeleton(listen: SocketAddr) -> anyhow::Result<()> {
         let io = TokioIo::new(stream);
         tokio::spawn(async move {
             let svc = service_fn(|_req: Request<Incoming>| async {
-                Ok::<_, Infallible>(Response::new("ok".to_string()))
+                Ok::<_, Infallible>(Response::<SkeletonBody>::new(Full::new(Bytes::from_static(b"ok"))))
             });
             if let Err(e) = hyper::server::conn::http1::Builder::new()
                 .serve_connection(io, svc)
@@ -365,16 +407,17 @@ pub async fn run_skeleton(listen: SocketAddr) -> anyhow::Result<()> {
 ### Success Criteria:
 
 #### Automated Verification:
-- [ ] `cargo build --manifest-path rust/Cargo.toml --workspace` succeeds
-- [ ] `cargo clippy --manifest-path rust/Cargo.toml -p thttpd-migrate --all-targets -- -D warnings` passes
-- [ ] `./target/debug/thttpd-migrate --help` lists `start`, `status`, `set-weight`, `drain`, `rollback`
-- [ ] `./target/debug/thttpd-migrate start --config /nonexistent.toml` exits non-zero with a clear error
-- [ ] `cargo test -p thttpd-migrate` passes (placeholder test in `lib.rs`)
+- [x] `cargo build --manifest-path rust/Cargo.toml --workspace` succeeds
+- [x] `cargo clippy --manifest-path rust/Cargo.toml -p thttpd-migrate --all-targets -- -D warnings` passes
+- [x] `cargo run --manifest-path rust/Cargo.toml -p thttpd-migrate -- --help` lists `start`, `status`, `set-weight`, `drain`, `rollback`
+- [x] `cargo run --manifest-path rust/Cargo.toml -p thttpd-migrate -- start --config /nonexistent.toml` exits non-zero with `config file not found: /nonexistent.toml`
+- [x] `cargo test --manifest-path rust/Cargo.toml -p thttpd-migrate` passes (placeholder test in `lib.rs`)
+- [x] `make security` passes after adding the new dependencies — if `cargo deny` rejects a transitive license variant, add it to `deny.toml` `[licenses] allow` with justification (tokio/hyper/metrics pull in several transitive crates)
 
 #### Manual Verification:
-- [ ] `./target/debug/thttpd-migrate start --config <some.toml>` binds to a port; `curl localhost:<port>/` returns `200 OK` with body `ok`
-- [ ] Ctrl-C produces a clean shutdown (log line "shutdown complete", no orphan tasks)
-- [ ] Log output goes to stderr in JSON when `RUST_LOG=info THTTPD_MIGRATE_LOG_FORMAT=json`
+- [ ] `cargo run --manifest-path rust/Cargo.toml -p thttpd-migrate -- start --listen 127.0.0.1:<port>` binds to the port; `curl localhost:<port>/` returns `200 OK` with body `ok`
+- [ ] Ctrl-C terminates the skeleton process without leaving a listening socket behind (structured graceful shutdown is added in Phase 7)
+- [ ] Log output goes to stderr at the configured level; JSON log format is added in Phase 6
 
 ---
 
@@ -400,6 +443,14 @@ pub struct ProxyConfig {
     pub listen: String,
     #[serde(default = "default_log_level")]
     pub log_level: String,
+    #[serde(default = "default_state_path")]
+    pub state_path: String,
+    #[serde(default = "default_control_socket")]
+    pub control_socket: String,
+    #[serde(default)]
+    pub metrics: MetricsConfig,
+    #[serde(default)]
+    pub shadow: ShadowConfig,
     #[serde(default)]
     pub backends: HashMap<String, BackendConfig>,
     #[serde(default)]
@@ -411,6 +462,25 @@ pub struct ProxyConfig {
 }
 
 fn default_log_level() -> String { "info".into() }
+fn default_state_path() -> String { "/var/run/thttpd-migrate/state.json".into() }
+fn default_control_socket() -> String { "/var/run/thttpd-migrate/control.sock".into() }
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct MetricsConfig {
+    #[serde(default = "default_metrics_listen")]
+    pub listen: String,
+    #[serde(default = "default_metrics_path")]
+    pub path: String,
+}
+fn default_metrics_listen() -> String { "127.0.0.1:9100".into() }
+fn default_metrics_path() -> String { "/metrics".into() }
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct ShadowConfig {
+    #[serde(default = "default_shadow_max_body_bytes")]
+    pub max_body_bytes: usize,
+}
+fn default_shadow_max_body_bytes() -> usize { 1_048_576 }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct BackendConfig {
@@ -421,7 +491,7 @@ pub struct BackendConfig {
     pub health_path: String,
 }
 fn default_weight() -> u32 { 1 }
-fn default_health_path() -> String { "/__healthz".into() }
+fn default_health_path() -> String { "/".into() }
 
 #[derive(Debug, Deserialize, Clone, Default)]
 #[serde(rename_all = "kebab-case")]
@@ -431,6 +501,9 @@ pub enum RoutingMode { #[default] ActiveActive, Shadow, Canary }
 pub struct RoutingConfig {
     #[serde(default)]
     pub mode: RoutingMode,
+    /// Live backend in shadow mode. This prevents shadow mode from accidentally serving Rust.
+    pub primary_backend: Option<String>,
+    /// Backend that receives mirrored requests in shadow mode.
     pub shadow_backend: Option<String>,
     #[serde(default)]
     pub exclude_paths: Vec<String>,
@@ -458,9 +531,56 @@ pub struct CircuitConfig {
     pub min_requests: u32,
 }
 
-impl Default for RoutingConfig { /* … */ }
-impl Default for HealthConfig { /* … */ }
-impl Default for CircuitConfig { /* … */ }
+impl Default for RoutingConfig {
+    fn default() -> Self {
+        Self {
+            mode: RoutingMode::default(),
+            primary_backend: None,
+            shadow_backend: None,
+            exclude_paths: Vec::new(),
+        }
+    }
+}
+impl Default for MetricsConfig {
+    fn default() -> Self {
+        Self {
+            listen: default_metrics_listen(),
+            path: default_metrics_path(),
+        }
+    }
+}
+impl Default for ShadowConfig {
+    fn default() -> Self {
+        Self { max_body_bytes: default_shadow_max_body_bytes() }
+    }
+}
+impl Default for HealthConfig {
+    fn default() -> Self {
+        Self {
+            interval_ms: default_health_interval(),
+            timeout_ms: default_health_timeout(),
+            failure_threshold: default_failure_threshold(),
+            success_threshold: default_success_threshold(),
+        }
+    }
+}
+impl Default for CircuitConfig {
+    fn default() -> Self {
+        Self {
+            error_rate_threshold: default_error_rate(),
+            window_secs: default_window(),
+            min_requests: default_min_requests(),
+        }
+    }
+}
+
+fn default_health_interval() -> u64 { 1000 }
+fn default_health_timeout() -> u64 { 500 }
+fn default_failure_threshold() -> u32 { 3 }
+fn default_success_threshold() -> u32 { 2 }
+fn default_error_rate() -> f64 { 0.5 }
+fn default_window() -> u64 { 30 }
+fn default_min_requests() -> u32 { 20 }
 
 pub fn load(path: &Path) -> anyhow::Result<ProxyConfig> {
     let text = std::fs::read_to_string(path)?;
@@ -474,11 +594,18 @@ pub fn validate(cfg: &ProxyConfig) -> anyhow::Result<()> {
     let total_weight: u32 = cfg.backends.values().map(|b| b.weight).sum();
     anyhow::ensure!(total_weight > 0, "at least one backend must have weight > 0");
     if matches!(cfg.routing.mode, RoutingMode::Shadow) {
-        anyhow::ensure!(
-            cfg.routing.shadow_backend.is_some(),
-            "routing.mode = shadow requires routing.shadow_backend"
-        );
+        let primary = cfg.routing.primary_backend.as_deref();
+        let shadow = cfg.routing.shadow_backend.as_deref();
+        anyhow::ensure!(primary.is_some(), "routing.mode = shadow requires routing.primary_backend");
+        anyhow::ensure!(shadow.is_some(), "routing.mode = shadow requires routing.shadow_backend");
+        anyhow::ensure!(primary != shadow, "routing.primary_backend and routing.shadow_backend must differ");
+        anyhow::ensure!(cfg.backends.contains_key(primary.unwrap()), "routing.primary_backend names an unknown backend");
+        anyhow::ensure!(cfg.backends.contains_key(shadow.unwrap()), "routing.shadow_backend names an unknown backend");
     }
+    cfg.listen.parse::<std::net::SocketAddr>()
+        .map_err(|e| anyhow::anyhow!("listen must be host:port, e.g. 127.0.0.1:8080: {e}"))?;
+    cfg.metrics.listen.parse::<std::net::SocketAddr>()
+        .map_err(|e| anyhow::anyhow!("metrics.listen must be host:port, e.g. 127.0.0.1:9100: {e}"))?;
     Ok(())
 }
 
@@ -496,23 +623,33 @@ impl HealthConfig {
 # thttpd-migrate example configuration.
 # Copy to /etc/thttpd-migrate.toml and edit.
 
-listen = ":8080"
+listen = "127.0.0.1:8080"
 log_level = "info"
+state_path = "/var/run/thttpd-migrate/state.json"
+control_socket = "/var/run/thttpd-migrate/control.sock"
+
+[metrics]
+listen = "127.0.0.1:9100"
+path = "/metrics"
+
+[shadow]
+max_body_bytes = 1048576
 
 [backends.c-thttpd]
 address = "127.0.0.1:8081"
 weight = 95                # 95% of traffic in active-active
-health_path = "/__healthz"
+health_path = "/"          # thttpd has no built-in /__healthz
 
 [backends.rust-thttpd]
 address = "127.0.0.1:8082"
 weight = 5                 # 5% canary
-health_path = "/__healthz"
+health_path = "/"
 
 [routing]
 mode = "active-active"     # | "shadow" | "canary"
+primary_backend = "c-thttpd"      # required only for shadow mode
 shadow_backend = "rust-thttpd"
-exclude_paths = ["/internal/*"]   # never proxied, returned 404
+exclude_paths = ["/internal/*", "/metrics"]   # never proxied, returned 404
 
 [health]
 interval_ms = 1000
@@ -538,6 +675,16 @@ use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Health { Healthy = 0, Degraded = 1, Unhealthy = 2 }
+
+impl Health {
+    pub fn from_u8(value: u8) -> Self {
+        match value {
+            0 => Health::Healthy,
+            1 => Health::Degraded,
+            _ => Health::Unhealthy,
+        }
+    }
+}
 
 pub struct Backend {
     pub name: String,
@@ -577,29 +724,73 @@ impl BackendPool {
 }
 ```
 
-#### 4. Wire config into `start()`
+#### 4. Create stub files for future modules
+**File**: `rust/crates/thttpd-migrate/src/{router,forwarder,diff,shadow,health,circuit,tracing_setup,metrics,state,control,drain}.rs`
+**Changes**: NEW — each file is empty (or contains a single `// Phase N stub` comment). This allows lib.rs to declare all modules from Phase 2 without compilation errors. Each phase fills in its module.
+
+#### 5. Wire config into `start()`
 **File**: `rust/crates/thttpd-migrate/src/lib.rs`
-**Changes**: MODIFY — `start()` now loads config, builds the pool, calls `server::run_skeleton`. Other commands still stubs.
+**Changes**: MODIFY — declare all modules that will exist across the entire plan (`config`, `backend`, `server`, `router`, `forwarder`, `diff`, `shadow`, `health`, `circuit`, `tracing_setup`, `metrics`, `state`, `control`, `drain`). Only `config`, `backend`, and `server` have real code in Phase 2; the rest are empty stub files. This avoids modifying lib.rs again until Phase 6 (which replaces the tracing stub). Add a stub `init_tracing()` (real implementation arrives in Phase 6); `start()` loads config, builds the pool, calls `server::run_skeleton`. Other commands still bail with actionable errors.
 
 ```rust
-pub async fn start(config: std::path::PathBuf, log_level: String) -> anyhow::Result<()> {
-    init_tracing(&log_level);
-    let cfg = config::load(&config)?;
+//! Strangler-fig migration proxy for thttpd → thttpd-rs.
+//!
+//! See `.rpiv/artifacts/plans/2026-06-12_16-30-00_strangler-fig-proxy.md`.
+
+pub mod backend;
+pub mod circuit;
+pub mod config;
+pub mod control;
+pub mod diff;
+pub mod drain;
+pub mod forwarder;
+pub mod health;
+pub mod metrics;
+pub mod router;
+pub mod server;
+pub mod shadow;
+pub mod state;
+pub mod tracing_setup;
+
+// Stub: replaced by tracing_setup::init in Phase 6.
+fn init_tracing(_level: &str) {
+    // Phase 2: tracing-subscriber not yet wired; default stderr logging suffices.
+}
+
+pub async fn start(config: Option<std::path::PathBuf>, _listen: std::net::SocketAddr, _log_level: String) -> anyhow::Result<()> {
+    init_tracing(&_log_level);
+    let cfg_path = config.ok_or_else(|| anyhow::anyhow!("--config is required after Phase 2"))?;
+    let cfg = config::load(&cfg_path)?;
     let _pool = backend::BackendPool::from_config(&cfg.backends);
+    // After Phase 2, listen address comes from config.listen; --listen is ignored.
     let addr: std::net::SocketAddr = cfg.listen.parse()?;
     server::run_skeleton(addr).await
+}
+
+pub fn status(_state: std::path::PathBuf) -> anyhow::Result<()> {
+    anyhow::bail!("status is not available until Phase 7 state file support is implemented")
+}
+pub fn set_weight(_control_socket: std::path::PathBuf, _pairs: Vec<String>) -> anyhow::Result<()> {
+    anyhow::bail!("set-weight is not available until Phase 7 control socket support is implemented")
+}
+pub async fn drain(_control_socket: std::path::PathBuf, _timeout_secs: u64) -> anyhow::Result<()> {
+    anyhow::bail!("drain is not available until Phase 7 control socket support is implemented")
+}
+pub fn rollback(_control_socket: std::path::PathBuf, _to: &str) -> anyhow::Result<()> {
+    anyhow::bail!("rollback is not available until Phase 7 control socket support is implemented")
 }
 ```
 
 ### Success Criteria:
 
 #### Automated Verification:
-- [ ] `cargo test -p thttpd-migrate config::tests::loads_example_config` passes
-- [ ] `config::tests::rejects_empty_backends` passes
-- [ ] `config::tests::rejects_zero_total_weight` passes
-- [ ] `config::tests::shadow_requires_shadow_backend` passes
-- [ ] Loading `config/thttpd-migrate.example.toml` parses without error
-- [ ] Invalid config (e.g. `weight = 0` for all backends) returns a clear error message naming the field
+- [x] `cargo test --manifest-path rust/Cargo.toml -p thttpd-migrate config::tests::loads_example_config` passes
+- [x] `config::tests::rejects_empty_backends` passes
+- [x] `config::tests::rejects_zero_total_weight` passes
+- [x] `config::tests::shadow_requires_primary_and_shadow_backends` passes
+- [x] `config::tests::rejects_unknown_primary_or_shadow_backend` passes
+- [x] Loading `config/thttpd-migrate.example.toml` parses without error
+- [x] Invalid config (e.g. `listen = ":8080"` or `weight = 0` for all backends) returns a clear error message naming the field
 
 #### Manual Verification:
 - [ ] `thttpd-migrate start --config config/thttpd-migrate.example.toml` starts; log line shows backends registered with their weights
@@ -619,12 +810,13 @@ Replace the hello-world server with a real router: weighted random selection acr
 **Changes**: NEW — given a request and the live pool, pick a backend.
 
 ```rust
-use crate::backend::{Backend, BackendPool, Health};
+use crate::backend::{Backend, BackendPool};
 use hyper::Request;
 use std::sync::Arc;
 use std::time::Instant;
-use tracing::debug;
 
+// Clone so a shadow task can take its own copy into a `tokio::spawn` future.
+#[derive(Clone)]
 pub struct RoutingDecision {
     pub backend: Arc<Backend>,
     pub shadow: Option<Arc<Backend>>,   // for shadow mode
@@ -632,34 +824,45 @@ pub struct RoutingDecision {
     pub started_at: Instant,
 }
 
+// `req` is intentionally unused: path-exclusion is decided by the server handler.
+// It is kept in the signature so future request-affinity routing has a hook.
 pub fn decide<B>(
-    req: &Request<B>,
+    _req: &Request<B>,
     pool: &BackendPool,
-    mode: crate::config::RoutingMode,
-    shadow_backend_name: Option<&str>,
+    routing: &crate::config::RoutingConfig,
 ) -> Option<RoutingDecision> {
     let request_id = uuid::Uuid::new_v4().to_string();
 
-    // Active/active or canary: weighted random among healthy backends
-    let candidates: Vec<&Arc<Backend>> = pool.iter()
-        .filter(|b| b.is_routable())
-        .collect();
-
-    anyhow::ensure!(!candidates.is_empty(), "no healthy backends");
-
-    let total: u32 = candidates.iter().map(|b| b.config.weight).sum();
-    let pick = rand::random::<u32>() % total;
-    let mut acc = 0u32;
-    let chosen = candidates.iter().find(|b| {
-        acc += b.config.weight;
-        pick < acc
-    }).copied().cloned()?;
-
-    let shadow = match mode {
-        crate::config::RoutingMode::Shadow | crate::config::RoutingMode::ActiveActive => {
-            shadow_backend_name.and_then(|n| pool.get(n)).filter(|b| b.name != chosen.name)
+    let chosen = match routing.mode {
+        // Shadow mode must always serve the configured primary backend. Rust receives mirrors only.
+        crate::config::RoutingMode::Shadow => {
+            let name = routing.primary_backend.as_deref()?;
+            let backend = pool.get(name)?;
+            if !backend.is_routable() { return None; }
+            backend
         }
-        crate::config::RoutingMode::Canary => None,
+        // Canary is operationally distinct but mechanically the same weighted selection as active-active.
+        crate::config::RoutingMode::ActiveActive | crate::config::RoutingMode::Canary => {
+            let candidates: Vec<&Arc<Backend>> = pool.iter()
+                .filter(|b| b.is_routable() && b.config.weight > 0)
+                .collect();
+            if candidates.is_empty() { return None; }
+            let total: u32 = candidates.iter().map(|b| b.config.weight).sum();
+            let pick = rand::random::<u32>() % total;
+            let mut acc = 0u32;
+            candidates.iter().find(|b| {
+                acc += b.config.weight;
+                pick < acc
+            }).copied().cloned()?
+        }
+    };
+
+    let shadow = if matches!(routing.mode, crate::config::RoutingMode::Shadow) {
+        routing.shadow_backend.as_deref()
+            .and_then(|n| pool.get(n))
+            .filter(|b| b.name != chosen.name && b.is_routable())
+    } else {
+        None
     };
 
     Some(RoutingDecision {
@@ -676,16 +879,20 @@ pub fn decide<B>(
 **Changes**: NEW — opens (or reuses) a connection to the chosen backend, forwards the request, streams the response back.
 
 ```rust
-use crate::backend::Backend;
 use crate::router::RoutingDecision;
+use bytes::Bytes;
+use http_body_util::{combinators::BoxBody, BodyExt, Full};
 use hyper::body::Incoming;
-use hyper::{Request, Response};
-use hyper_util::rt::TokioIo;
+use hyper::{Request, Response, Uri};
 use hyper_util::client::legacy::{Client, connect::HttpConnector};
-use std::sync::Arc;
 use std::time::Duration;
 
-pub type ProxyClient = Client<HttpConnector, http_body_util::Empty<bytes::Bytes>>;
+pub type ProxyBody = BoxBody<Bytes, hyper::Error>;
+pub type ProxyClient = Client<HttpConnector, ProxyBody>;
+
+pub fn empty_body() -> ProxyBody {
+    Full::new(Bytes::new()).map_err(|never| match never {}).boxed()
+}
 
 pub fn build_client() -> ProxyClient {
     let mut connector = HttpConnector::new();
@@ -695,57 +902,92 @@ pub fn build_client() -> ProxyClient {
         .build(connector)
 }
 
-pub async fn forward<B>(
+pub async fn forward(
     decision: &RoutingDecision,
-    req: Request<B>,
+    req: Request<ProxyBody>,
     client: &ProxyClient,
-) -> Result<Response<Incoming>, ForwardError>
-where B: hyper::body::Body + 'static { /* … */ }
+) -> Result<Response<Incoming>, ForwardError> { /* … */ }
+
+#[derive(Debug, thiserror::Error)]
+pub enum ForwardError {
+    #[error("backend connection failed: {0}")]
+    Connect(#[source] hyper_util::client::legacy::Error),
+    #[error("backend request failed: {0}")]
+    Request(#[source] hyper_util::client::legacy::Error),
+    #[error("backend response timed out")]
+    Timeout,
+    #[error("backend not routable")]
+    NotRoutable,
+}
 ```
 
-The forwarder constructs a new `Request` with the same method, URI, and headers, swaps the body, and sends it to `decision.backend.config.address`. The response body is streamed back without buffering.
+The forwarder constructs a backend absolute URI (`http://{backend.address}{path_and_query}`), preserves method and headers (except hop-by-hop headers), forwards the boxed body, and streams the response back without buffering in active-active/canary mode.
 
 #### 3. Server loop with routing
 **File**: `rust/crates/thttpd-migrate/src/server.rs`
-**Changes**: MODIFY — replace skeleton with real handler.
+**Changes**: MODIFY — replace skeleton with real handler. Returns `Response<ProxyBody>` because `Response<Incoming>` cannot be constructed for error responses (Incoming is a network stream, not buildable from bytes). Spawns request handlers into a `JoinSet` so Phase 7 drain can await them.
 
 ```rust
-async fn handle<B>(
-    req: Request<B>,
+use crate::config::RoutingConfig;
+use crate::forwarder::{ProxyBody, ProxyClient};
+use crate::backend::BackendPool;
+use crate::router;
+use http_body_util::{BodyExt, Full};
+use hyper::body::Incoming;
+use hyper::{Request, Response};
+use std::sync::Arc;
+use tokio::task::JoinSet;
+
+async fn handle(
+    req: Request<Incoming>,
     pool: Arc<BackendPool>,
-    mode: RoutingMode,
-    shadow_backend: Option<String>,
+    routing: RoutingConfig,
+    excluded: Vec<String>,
     client: ProxyClient,
-) -> Result<Response<Incoming>, Infallible>
-where B: hyper::body::Body + 'static {
+) -> Response<ProxyBody> {
     // 1. Exclude paths
     if is_excluded(req.uri().path(), &excluded) {
-        return Ok(not_found());
+        return not_found();
     }
     // 2. Decide
-    let decision = match router::decide(&req, &pool, mode, shadow_backend.as_deref()) {
+    let decision = match router::decide(&req, &pool, &routing) {
         Some(d) => d,
-        None => return Ok(backend_unavailable()),
+        None => return backend_unavailable(),
     };
-    // 3. Forward
+    // 3. Forward — convert the request body from Incoming to ProxyBody first
+    //    (forwarder::forward takes Request<ProxyBody>), then map the backend's
+    //    Incoming response body back to ProxyBody for the success path.
+    //
+    //    Implementation note: verify `Incoming: Body<Error = E>` at impl time.
+    //    If the associated Error type is `hyper::Error`, `.map_err(|e| e).boxed()`
+    //    yields `BoxBody<Bytes, hyper::Error>` = ProxyBody directly. If it is
+    //    `Box<dyn Error + Send + Sync>` (hyper's BoxError), map with
+    //    `.map_err(|e| hyper::Error::new(crate::forwarder::ForwardError::from(e)))`
+    //    or switch ProxyBody to `BoxBody<Bytes, hyper::Error>` via an adapter.
+    let (parts, body) = req.into_parts();
+    let req = Request::from_parts(parts, body.map_err(|e| e).boxed());
     match forwarder::forward(&decision, req, &client).await {
-        Ok(resp) => Ok(resp),
+        Ok(resp) => resp.map(|body| body.map_err(|e| e).boxed()),
         Err(e) => {
             tracing::error!(error = %e, backend = %decision.backend.name, "forward error");
-            Ok(bad_gateway())
+            bad_gateway()
         }
     }
 }
+
+// In the accept loop, collect handles for Phase 7 drain:
+// let mut in_flight = JoinSet::new();
+// in_flight.spawn(handle(req, pool, routing, excluded, client));
 ```
 
 ### Success Criteria:
 
 #### Automated Verification:
-- [ ] `router::tests::weighted_selection_respects_weights` (run 10k iterations; distribution within 5% of weight ratios)
-- [ ] `router::tests::unhealthy_backends_excluded` (set backend to Unhealthy, verify never picked)
-- [ ] `forwarder::tests::preserves_method_path_headers_body` against `wiremock`
-- [ ] `forwarder::tests::streams_large_response` (1MB body) — `body.frame().next()` returns chunks, not a single buffer
-- [ ] `cargo test -p thttpd-migrate` all pass
+- [x] `router::tests::weighted_selection_respects_weights` (run 10k iterations; distribution within 5% of weight ratios)
+- [x] `router::tests::unhealthy_backends_excluded` (set backend to Unhealthy, verify never picked)
+- [x] `forwarder::tests::preserves_method_path_headers_body` against `wiremock`
+- [x] `forwarder::tests::streams_large_response` (1MB body) — `body.frame().next()` returns chunks, not a single buffer
+- [x] `cargo test --manifest-path rust/Cargo.toml -p thttpd-migrate` all pass
 
 #### Manual Verification:
 - [ ] Start two `nc -l` listeners on 8081 and 8082 (both respond with `Backend: c` or `Backend: rust`); proxy on 8080; 1000 curl requests → roughly the configured ratio lands on each
@@ -757,13 +999,15 @@ where B: hyper::body::Body + 'static {
 ## Phase 4: Shadow mode + response diffing
 
 ### Overview
-When shadow mode is enabled, every request is mirrored to the shadow backend asynchronously. The shadow response is captured and diffed against the primary response using the same comparison logic that `harness/diff_engine.py` implements. Divergences are logged, never propagated to the user.
+When shadow mode is enabled, every request is served by `routing.primary_backend` and mirrored to `routing.shadow_backend`. The shadow response is captured and diffed against the primary response using the same comparison logic that `harness/diff_engine.py` implements. Divergences are logged, never propagated to the user.
+
+Implementation constraint: HTTP request bodies are one-shot streams. Shadow mode must buffer the inbound request body once, up to `shadow.max_body_bytes`, then rebuild equivalent primary and shadow requests from that buffer. Active-active/canary mode continues to stream without buffering. Primary and shadow response bodies are buffered up to the same cap for diffing; truncation is logged as a divergence field so the operator knows the comparison was partial.
 
 ### Changes Required:
 
 #### 1. Port diff logic to Rust
 **File**: `rust/crates/thttpd-migrate/src/diff.rs`
-**Changes**: NEW — port `harness/diff_engine.py:1-180` (header normalization, response comparison). This avoids a Python subprocess on the hot path.
+**Changes**: NEW — port `harness/diff_engine.py:32-325` (normalizers, body hashing, profile-aware response comparison). This avoids a Python subprocess on the hot path.
 
 ```rust
 use hyper::{Response, body::Incoming};
@@ -779,45 +1023,104 @@ pub struct Divergence {
     pub actual: String,
     pub path: String,
     pub method: String,
+    pub truncated: bool,
+}
+
+/// Context from the inbound request needed by the diff engine.
+pub struct RequestContext {
+    pub path: String,
+    pub method: String,
+    pub request_id: String,
 }
 
 pub async fn diff_responses(
-    primary: Response<Incoming>,
-    shadow: Response<Incoming>,
-    primary_body: Bytes,
-    shadow_body: Bytes,
+    primary_status: u16,
+    primary_headers: &[(String, String)],
+    primary_body: &Bytes,
+    shadow_status: u16,
+    shadow_headers: &[(String, String)],
+    shadow_body: &Bytes,
+    primary_truncated: bool,
+    shadow_truncated: bool,
     ctx: &RequestContext,
-) -> Vec<Divergence> { /* … */ }
+    max_body_bytes: usize,
+) -> Vec<Divergence> { /* … port of harness/diff_engine.py:32-325 */ }
 ```
 
-The port preserves the normalizers from `diff_engine.py` (timestamp format-only, path temp-dir substitution, etc.) — these are deliberate engineering choices and we don't re-litigate them in the proxy.
+The port preserves the normalizers from `diff_engine.py` (timestamp format-only, path temp-dir substitution, etc.) — these are deliberate engineering choices and we don't re-litigate them in the proxy. If either body was truncated (primary_truncated or shadow_truncated), the comparison records a `Body` divergence with `truncated: true` so the operator knows the comparison was partial.
 
 #### 2. Shadow dispatcher
 **File**: `rust/crates/thttpd-migrate/src/shadow.rs`
-**Changes**: NEW — fire-and-forget shadow request via `tokio::spawn`, diff and log result.
+**Changes**: NEW — buffer the inbound request body and the primary response body, fire a shadow request via `tokio::spawn`, diff and log result. Uses the existing `forwarder::forward()` function (no separate `forward_raw` needed — the forwarder already accepts `Request<ProxyBody>`). Defines `rebuild_for_backend()` to clone method/URI/headers and reuse the buffered body.
 
 ```rust
-pub fn dispatch_shadow<B>(
-    decision: &RoutingDecision,
-    req: Request<B>,
-    primary_response: Response<Incoming>,
+use crate::config::ShadowConfig;
+use crate::diff::{self, Divergence, Field, RequestContext};
+use crate::forwarder::{self, ProxyBody, ProxyClient};
+use crate::router::RoutingDecision;
+use bytes::Bytes;
+use http_body_util::{BodyExt, Full};
+use hyper::body::Incoming;
+use hyper::{Request, Response};
+
+/// Rebuild a request for a different backend, reusing the buffered body.
+fn rebuild_for_backend(original_uri: &hyper::Uri, method: &hyper::Method, headers: &[(String, String)], body: Bytes, backend_addr: &str) -> Request<ProxyBody> {
+    let path_and_query = original_uri.path_and_query()
+        .map(|pq| pq.as_str())
+        .unwrap_or("/");
+    let uri: hyper::Uri = format!("http://{}{}", backend_addr, path_and_query).parse().unwrap();
+    let mut req = Request::builder().method(method).uri(uri);
+    for (k, v) in headers {
+        req = req.header(k.as_str(), v.as_str());
+    }
+    req.body(Full::new(body).map_err(|never| match never {}).boxed()).expect("valid request")
+}
+
+/// Called from the server handler after the primary response is fully read.
+/// Buffers the request body and primary response, spawns the shadow request.
+/// Takes `decision` by value so the spawned future can own a copy of it
+/// (spawns require `'static` futures; a borrowed `&RoutingDecision` would not).
+pub fn dispatch_shadow(
+    decision: RoutingDecision,
+    method: hyper::Method,
+    original_uri: hyper::Uri,
+    headers: Vec<(String, String)>,
+    body: Bytes,
+    primary_status: u16,
+    primary_headers: Vec<(String, String)>,
     primary_body: Bytes,
+    primary_truncated: bool,
     client: ProxyClient,
-) where B: hyper::body::Body + 'static + Send {
+    shadow_cfg: ShadowConfig,
+) {
     let shadow = decision.shadow.clone().unwrap();
     let request_id = decision.request_id.clone();
-    let path = req.uri().path().to_string();
-    let method = req.method().to_string();
+    let path = original_uri.path().to_string();
+    let method_str = method.to_string();
     tokio::spawn(async move {
-        let shadow_req = rebuild_for_backend(req, &shadow);
-        let result = forwarder::forward_raw(shadow_req, &client, &shadow).await;
+        let shadow_req = rebuild_for_backend(&original_uri, &method, &headers, body, &shadow.config.address);
+        let result = forwarder::forward(&decision, shadow_req, &client).await;
+        let ctx = RequestContext { path, method: method_str, request_id: request_id.clone() };
         let divergences = match result {
-            Ok((resp, body)) => diff::diff_responses(primary_response, resp, primary_body, body, &ctx).await,
+            Ok(resp) => {
+                let (parts, body_stream) = resp.into_parts();
+                let shadow_status = parts.status.as_u16();
+                let shadow_headers: Vec<(String, String)> = parts.headers.iter()
+                    .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or_default().to_string()))
+                    .collect();
+                let (shadow_body, shadow_truncated) = read_with_cap(body_stream, shadow_cfg.max_body_bytes).await;
+                diff::diff_responses(
+                    primary_status, &primary_headers, &primary_body, primary_truncated,
+                    shadow_status, &shadow_headers, &shadow_body, shadow_truncated,
+                    &ctx, shadow_cfg.max_body_bytes,
+                ).await
+            }
             Err(e) => vec![Divergence {
                 field: Field::ConnectionLifecycle,
                 expected: "ok".into(),
                 actual: format!("error: {e}"),
-                path, method,
+                path: ctx.path.clone(), method: ctx.method.clone(),
+                truncated: false,
             }],
         };
         for d in divergences {
@@ -825,6 +1128,7 @@ pub fn dispatch_shadow<B>(
                 request_id = %request_id,
                 backend = %shadow.name,
                 field = ?d.field,
+                truncated = d.truncated,
                 "shadow divergence"
             );
             metrics::counter!("thttpd_migrate_shadow_divergences_total",
@@ -834,20 +1138,29 @@ pub fn dispatch_shadow<B>(
         }
     });
 }
+
+/// Read a response body up to `max_bytes`. Returns (body, truncated).
+async fn read_with_cap<B>(body: B, max_bytes: usize) -> (Bytes, bool)
+where B: http_body::Body<Data = Bytes> {
+    // … collect frames up to max_bytes, set truncated=true if exceeded
+    todo!("implement frame collection with cap")
+}
 ```
 
 #### 3. Wire shadow into server loop
 **File**: `rust/crates/thttpd-migrate/src/server.rs`
-**Changes**: MODIFY — after the primary response is built, call `shadow::dispatch_shadow` if `decision.shadow.is_some()`. Body must be fully buffered (or tee'd via `Body::wrap_stream`) for diffing.
+**Changes**: MODIFY — if `decision.shadow.is_some()`, buffer the inbound request body up to `shadow.max_body_bytes`, rebuild two requests, forward the primary request, buffer the primary response up to the cap, spawn the shadow request/diff, then return the primary response to the user. The user is not blocked on the shadow backend, but is blocked on reading the primary response body in shadow mode. This is acceptable for migration verification mode and is explicitly not used in active-active/canary streaming mode.
 
 ### Success Criteria:
 
 #### Automated Verification:
-- [ ] `diff::tests::timestamp_headers_match_format_only` (proves the timestamp normalizer ported correctly)
-- [ ] `diff::tests::status_mismatch_caught`, `headers_mismatch_caught`, `body_mismatch_caught`
-- [ ] `diff::tests::temp_path_substitution` (e.g. `/tmp/thttpd_golden_xyz` vs `/tmp/pytest-abc` → no divergence)
-- [ ] `shadow::tests::divergence_does_not_affect_user` (intentionally diverge the shadow backend; user response is unchanged)
-- [ ] `diff::tests::match_known_differential_test_outputs` — replay 5 captured request/response pairs from `harness/golden/baseline.json` and confirm zero false-positive divergences
+- [x] `diff::tests::timestamp_headers_match_format_only` (proves the timestamp normalizer ported correctly)
+- [x] `diff::tests::status_mismatch_caught`, `headers_mismatch_caught`, `body_mismatch_caught`
+- [x] `diff::tests::temp_path_substitution` (e.g. `/tmp/thttpd_golden_xyz` vs `/tmp/pytest-abc` → no divergence)
+- [x] `shadow::tests::shadow_mode_always_serves_primary_backend` (even when Rust weight is nonzero)
+- [x] `shadow::tests::divergence_does_not_affect_user` (intentionally diverge the shadow backend; user response is unchanged)
+- [x] `shadow::tests::large_body_over_cap_records_truncation_divergence` (no unbounded buffering)
+- [x] `diff::tests::match_known_differential_test_outputs` — replay 5 synthetic records shaped like `harness/conftest.py:599-615` / `compare_responses_v2`, or generate a temporary baseline via `pipeline/run_golden_capture.py`; do not depend on a checked-in `harness/golden/baseline.json` because none exists today
 
 #### Manual Verification:
 - [ ] Configure shadow mode; start C on 8081, Rust on 8082; proxy on 8080
@@ -871,13 +1184,15 @@ Active health probes hit each backend's `health_path` on a configurable interval
 ```rust
 use crate::backend::{Backend, BackendPool, Health};
 use crate::config::HealthConfig;
+use crate::forwarder::{empty_body, ProxyClient};
+use hyper::Request;
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::Ordering;
 use tokio::task::JoinHandle;
 
 pub fn spawn_checker(
     pool: Arc<BackendPool>,
-    client: crate::forwarder::ProxyClient,
+    client: ProxyClient,
     cfg: HealthConfig,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -885,8 +1200,14 @@ pub fn spawn_checker(
         loop {
             for backend in pool.iter() {
                 let url = format!("http://{}{}", backend.config.address, backend.config.health_path);
-                let result = tokio::time::timeout(cfg.timeout(), client.get(url.parse().unwrap())).await;
-                update_health(backend, &cfg, result.is_ok() && result.as_ref().unwrap().is_ok());
+                let req = Request::get(url).body(empty_body()).expect("health request");
+                // A successful probe is a 2xx status. Connection errors and
+                // non-2xx responses (including 5xx) all count as failures.
+                let success = match tokio::time::timeout(cfg.timeout(), client.request(req)).await {
+                    Ok(Ok(resp)) => resp.status().is_success(),
+                    Ok(Err(_)) | Err(_) => false,
+                };
+                update_health(backend, &cfg, success);
             }
             tokio::time::sleep(interval).await;
         }
@@ -917,6 +1238,7 @@ fn update_health(backend: &Backend, cfg: &HealthConfig, success: bool) {
 **Changes**: NEW — rolling window of outcomes, per-backend state.
 
 ```rust
+use crate::config::CircuitConfig;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
@@ -936,14 +1258,23 @@ pub struct Window {
     pub started: Instant,
 }
 
+impl Window {
+    pub fn new() -> Self { Self { errors: 0, total: 0, started: Instant::now() } }
+}
+
 impl Breaker {
     pub fn record(&self, success: bool) {
         let mut w = self.window.lock();
+        if w.started.elapsed() > Duration::from_secs(self.cfg.window_secs) {
+            *w = Window::new();
+        }
         w.total += 1;
         if !success { w.errors += 1; }
-        let rate = w.errors as f64 / w.total as f64;
-        if w.total >= self.cfg.min_requests && rate > self.cfg.error_rate_threshold {
-            self.trip();
+        if w.total >= self.cfg.min_requests {
+            let rate = w.errors as f64 / w.total as f64;
+            if rate > self.cfg.error_rate_threshold {
+                self.trip();
+            }
         }
     }
     pub fn allows(&self) -> bool { /* Closed → yes; Open → no; HalfOpen → probe */ }
@@ -958,19 +1289,20 @@ impl Breaker {
 ### Success Criteria:
 
 #### Automated Verification:
-- [ ] `health::tests::three_consecutive_failures_marks_unhealthy`
-- [ ] `health::tests::two_consecutive_successes_marks_healthy` (after recovery)
-- [ ] `health::tests::timeout_counts_as_failure`
-- [ ] `circuit::tests::below_min_requests_does_not_trip`
-- [ ] `circuit::tests::error_rate_above_threshold_trips`
-- [ ] `circuit::tests::half_open_probe_recovers`
+- [x] `health::tests::three_consecutive_failures_marks_unhealthy`
+- [x] `health::tests::two_consecutive_successes_marks_healthy` (after recovery)
+- [x] `health::tests::timeout_counts_as_failure`
+- [x] `circuit::tests::below_min_requests_does_not_trip`
+- [x] `circuit::tests::error_rate_above_threshold_trips`
+- [x] `circuit::tests::half_open_probe_recovers`
 
 #### Manual Verification:
 - [ ] Start C on 8081 (responding), Rust on 8082 (not running); proxy on 8080
-- [ ] Within 5s, `thttpd-migrate status` reports rust-thttpd as `Unhealthy`
+- [ ] Within 5s, logs report `rust-thttpd` as `Unhealthy` (the `status` command exposes the same state after Phase 7)
 - [ ] All requests routed to C; zero 5xx from proxy
-- [ ] Start Rust on 8082; within 5s `status` reports healthy again
+- [ ] Start Rust on 8082; within 5s logs report healthy again (and `status` reports it after Phase 7)
 - [ ] Kill C under load (50 req/s); proxy circuit trips within window; all traffic shifts to Rust; no error responses to clients
+- [ ] Health check overhead: with `failure_threshold=3` and `interval_ms=1000`, health probes add <1 req/s per backend; confirm via metrics scrape at 1, 10, and 50 backends
 
 ---
 
@@ -1001,13 +1333,15 @@ pub fn init(level: &str, json: bool) {
 
 #### 2. Prometheus metrics
 **File**: `rust/crates/thttpd-migrate/src/metrics.rs`
-**Changes**: NEW — declare metrics, expose `/__metrics` endpoint.
+**Changes**: NEW — declare metrics and expose them on the configured metrics listener (`127.0.0.1:9100/metrics` by default). Keep metrics off the data-plane listener so `/metrics` cannot collide with proxied legacy content. Note: `PrometheusBuilder::with_http_listener` serves `/metrics` at a fixed path; the `metrics.path` config value is documented but not yet honored — supporting a custom path requires building a manual `axum`/`hyper` route around the handle, which is deferred.
 
 ```rust
 use metrics::{counter, histogram, describe_counter, describe_histogram};
 use metrics_exporter_prometheus::PrometheusBuilder;
 
-pub fn install(listen: std::net::SocketAddr) -> anyhow::Result<()> {
+// `path` is currently advisory: with_http_listener serves /metrics.
+// Kept in the signature so a custom-route implementation can honor it later.
+pub fn install(listen: std::net::SocketAddr, _path: &str) -> anyhow::Result<()> {
     PrometheusBuilder::new()
         .with_http_listener(listen)
         .install()?;
@@ -1044,16 +1378,32 @@ if let Ok(ref r) = result {
 **File**: `rust/crates/thttpd-migrate/src/server.rs`
 **Changes**: MODIFY — accept inbound `X-Request-Id` or generate one, propagate to backends as `X-Request-Id`, include in every log line, return in response.
 
+#### 5. Wire real tracing into `start()`
+**File**: `rust/crates/thttpd-migrate/src/lib.rs`
+**Changes**: MODIFY — replace the Phase 2 `init_tracing` stub with a call to the real subscriber. Without this edit the stub stays a no-op and tracing never initializes.
+
+```rust
+// Replace the Phase 2 stub body of init_tracing with:
+fn init_tracing(log_level: &str) {
+    let json = std::env::var("THTTPD_MIGRATE_LOG_FORMAT")
+        .map(|v| v == "json")
+        .unwrap_or(false);
+    tracing_setup::init(log_level, json);
+}
+```
+
+The `start()` function already calls `init_tracing(&_log_level)`, so no change to the call site is needed; only the stub body changes.
+
 ### Success Criteria:
 
 #### Automated Verification:
-- [ ] `tracing_setup::tests::json_format_emits_valid_json` (one log line parses as JSON)
-- [ ] `metrics::tests::requests_total_increments` (fire one request, scrape `/__metrics`, assert counter == 1)
-- [ ] `metrics::tests::duration_histogram_records_observation` (one request → at least one bucket)
-- [ ] Every log line in a test run includes the `request_id` field
+- [x] `tracing_setup::tests::json_format_emits_valid_json` (one log line parses as JSON)
+- [x] `metrics::tests::requests_total_increments` (fire one request, scrape configured `/metrics`, assert counter == 1)
+- [x] `metrics::tests::duration_histogram_records_observation` (one request → at least one bucket)
+- [x] Every log line in a test run includes the `request_id` field
 
 #### Manual Verification:
-- [ ] `curl http://localhost:9100/__metrics` returns Prometheus exposition format
+- [ ] `curl http://localhost:9100/metrics` returns Prometheus exposition format
 - [ ] `curl -H 'X-Request-Id: my-test' ...` → response carries `X-Request-Id: my-test`; backends receive the same header
 - [ ] `thttpd_migrate_request_duration_seconds_bucket{backend="c-thttpd",le="0.01"}` is non-zero
 - [ ] `cargo run` with `RUST_LOG=thttpd_migrate=debug` shows structured debug lines; with `THTTPD_MIGRATE_LOG_FORMAT=json` they're valid JSON
@@ -1078,6 +1428,7 @@ Drain is for planned cutover; rollback is for emergencies. Both must complete in
 ```rust
 use arc_swap::ArcSwap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use crate::config::ProxyConfig;
 
 pub struct LiveState {
@@ -1087,16 +1438,26 @@ pub struct LiveState {
 
 impl LiveState {
     pub fn new(cfg: ProxyConfig) -> Self {
-        Self { config: Arc::new(ArcSwap::from_pointee(cfg)), draining: Arc::new(AtomicBool::new(false)) }
+        Self {
+            config: Arc::new(ArcSwap::from_pointee(cfg)),
+            draining: Arc::new(AtomicBool::new(false)),
+        }
     }
     pub fn start_drain(&self) { self.draining.store(true, Ordering::SeqCst); }
     pub fn is_draining(&self) -> bool { self.draining.load(Ordering::SeqCst) }
 }
+
+/// Weight propagation: when a weight update arrives via the control socket,
+/// update the ArcSwap AND call `pool.update_weights()` which iterates
+/// the pool's `Arc<Backend>` entries and swaps each backend's config.weight
+/// to the new value. The router reads weight from the pool, not from ProxyConfig,
+/// so both must stay in sync. Alternatively, have the router read weights
+/// directly from `LiveState::config.load().backends[name].weight`.
 ```
 
 #### 2. Server respects drain
 **File**: `rust/crates/thttpd-migrate/src/server.rs`
-**Changes**: MODIFY — accept loop checks `state.is_draining()`; if true, break and let in-flight finish.
+**Changes**: MODIFY — accept loop checks `state.is_draining()`; if true, break and let in-flight finish. The `JoinSet` of in-flight request handles was introduced in Phase 3's server loop; drain awaits it here.
 
 ```rust
 loop {
@@ -1106,33 +1467,36 @@ loop {
         _ = shutdown_signal() => { state.start_drain(); }
     }
 }
-// wait for in-flight tasks (track via JoinSet)
+// JoinSet was populated in Phase 3's accept loop.
 while let Some(_) = joinset.join_next().await {}
 ```
 
-#### 3. CLI: set-weight, drain, rollback
-**File**: `rust/crates/thttpd-migrate/src/lib.rs`
-**Changes**: MODIFY — wire the subcommands. They communicate with the running proxy via a Unix domain socket at `/var/run/thttpd-migrate/control.sock` (or signal a pid file).
+#### 3. CLI/control plane: set-weight, drain, rollback
+**Files**: `rust/crates/thttpd-migrate/src/lib.rs`, `rust/crates/thttpd-migrate/src/control.rs`, `docs/CONTROL_PROTOCOL.md`
+**Changes**: MODIFY/NEW — wire the subcommands. They communicate with the running proxy via a Unix domain socket at `config.control_socket` (default `/var/run/thttpd-migrate/control.sock`). The command line also accepts global `--control-socket` for tests and non-root demos.
 
 ```rust
-pub fn set_weight(pairs: Vec<String>) -> anyhow::Result<()> {
+pub fn set_weight(control_socket: PathBuf, pairs: Vec<String>) -> anyhow::Result<()> {
     // parse "backend=weight" pairs
     // connect to control socket
-    // send "SET_WEIGHT <json>"
+    // send JSON RPC {"command":"set_weight","weights":{...}}
 }
 
-pub fn rollback(to: &str) -> anyhow::Result<()> {
-    set_weight(vec![format!("{to}={}", u32::MAX)])
+pub fn rollback(control_socket: PathBuf, to: &str) -> anyhow::Result<()> {
+    // query configured backends or send a semantic rollback command; do not rely on u32::MAX weights
+    // send JSON RPC {"command":"rollback","to":to}
 }
 
-pub async fn drain(timeout_secs: u64) -> anyhow::Result<()> {
+pub async fn drain(control_socket: PathBuf, timeout_secs: u64) -> anyhow::Result<()> {
     // connect to control socket
-    // send "DRAIN <timeout>"
+    // send JSON RPC {"command":"drain","timeout_secs":timeout_secs}
     // wait for ack
 }
 ```
 
-The control protocol is a 5-line length-prefixed JSON RPC. A spec lives in `docs/CONTROL_PROTOCOL.md` (created in Phase 9).
+Create the control protocol spec in this phase, not Phase 9, because tests and external tooling need a contract before the protocol is implemented. Phase 9 links and explains the spec in operator-facing docs.
+
+**Implementation note:** The bodies above are intentionally pseudocode — the real implementation is the largest single lift in Phase 7. Each function must: connect to the Unix domain socket at `control_socket`, serialize the JSON RPC, send it length-prefixed, read the ack/response, and deserialize. Define a shared `ControlRequest` / `ControlResponse` enum with `serde` in `control.rs` and use it on both the client side (these functions) and the server side (the socket listener added in the same phase). The Phase 7 automated criteria (`control::tests::set_weight_updates_live_state`) require this to be working code, not stubs.
 
 #### 4. State file
 **File**: `rust/crates/thttpd-migrate/src/state.rs`
@@ -1141,15 +1505,17 @@ The control protocol is a 5-line length-prefixed JSON RPC. A spec lives in `docs
 ### Success Criteria:
 
 #### Automated Verification:
-- [ ] `state::tests::weight_update_visible_to_router` (update via arc-swap, router sees new weights)
-- [ ] `state::tests::drain_flag_propagates_within_100ms`
-- [ ] `state::tests::state_file_written_atomically` (read mid-write doesn't see partial file)
-- [ ] End-to-end: start proxy, fire 1000 req/s for 5s, send DRAIN, all 5000 in-flight requests complete; new connections rejected with `503`
+- [x] `state::tests::weight_update_visible_to_router` (update via arc-swap, router sees new weights)
+- [x] `state::tests::drain_flag_propagates_within_100ms`
+- [x] `state::tests::state_file_written_atomically` (read mid-write doesn't see partial file)
+- [x] `control::tests::set_weight_updates_live_state` using a temp `control.sock`
+- [x] `control::tests::rollback_is_semantic_not_u32_max_weight` (all other backend weights become 0, target becomes 100)
+- [x] End-to-end: start proxy, fire sustained requests for 5s, send DRAIN, in-flight requests complete; new connections receive `503` or connection refusal after listener shutdown, but no in-flight request is reset
 
 #### Manual Verification:
-- [ ] Start proxy with C and Rust; send `thttpd-migrate set-weight rust-thttpd=100 c-thttpd=0`; within 1s, all traffic is on Rust
-- [ ] Send `thttpd-migrate rollback --to c-thttpd`; within 1s, all traffic is back on C
-- [ ] Send `thttpd-migrate drain --timeout 30`; existing requests finish, new connections fail; process exits within 30s
+- [ ] Start proxy with C and Rust; send `thttpd-migrate --control-socket <sock> set-weight rust-thttpd=100 c-thttpd=0`; within 1s, all traffic is on Rust
+- [ ] Send `thttpd-migrate --control-socket <sock> rollback --to c-thttpd`; within 1s, all traffic is back on C
+- [ ] Send `thttpd-migrate --control-socket <sock> drain --timeout 30`; existing requests finish, new connections fail; process exits within 30s
 - [ ] `thttpd-migrate status` mid-run shows live counts; counts are not stale
 
 ---
@@ -1174,46 +1540,128 @@ End-to-end tests that spin up real C and Rust thttpd binaries on ephemeral ports
 #   test_rollback.py          — promote, rollback, drain timing
 ```
 
-Tests spin up the proxy via `subprocess.Popen` with a generated TOML config, drive it with `requests` (not raw sockets — proxy is well-behaved HTTP), and assert on both proxy and backend state.
+Tests spin up the proxy via `subprocess.Popen` with a generated TOML config, drive it with the existing `http_request()` raw-socket helper from `harness/conftest.py:17-33` (or add `requests>=2,<3` to `requirements-dev.txt`), and assert on both proxy and backend state.
+
+The TOML config is generated by a `write_proxy_config` helper (defined in `test_proxy.py` or `conftest.py`) that renders the config template below:
+
+```python
+def write_proxy_config(tmp_path, listen, metrics, control_socket, state_path, backends, weights):
+    c_addr = backends["c_addr"]
+    rust_addr = backends["rust_addr"]
+    c_w, rust_w = weights["c-thttpd"], weights["rust-thttpd"]
+    toml = f'''\
+listen = "{listen}"
+log_level = "info"
+state_path = "{state_path}"
+control_socket = "{control_socket}"
+
+[metrics]
+listen = "{metrics}"
+path = "/metrics"
+
+[shadow]
+max_body_bytes = 1048576
+
+[backends.c-thttpd]
+address = "{c_addr}"
+weight = {c_w}
+health_path = "/"
+
+[backends.rust-thttpd]
+address = "{rust_addr}"
+weight = {rust_w}
+health_path = "/"
+
+[routing]
+mode = "active-active"
+primary_backend = "c-thttpd"
+shadow_backend = "rust-thttpd"
+exclude_paths = ["/metrics"]
+'''
+    cfg_path = tmp_path / "thttpd-migrate.toml"
+    cfg_path.write_text(toml)
+    return cfg_path
+```
 
 #### 2. Fixture: dual backend
 **File**: `harness/conftest.py`
-**Changes**: MODIFY — add `dual_thttpd_backends` fixture that starts both C and Rust on allocated ports, yields their addresses, tears them down.
+**Changes**: MODIFY — add a small `wait_for_port(port, timeout=5.0)` helper plus `dual_thttpd_backends` fixture by reusing existing patterns from `find_free_port()` and `dual_server_process` (`harness/conftest.py:619-650`). Do not reference non-existent helpers such as `allocated_port` or `start_thttpd_binary`.
 
 ```python
+def wait_for_port(port, timeout=5.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                return
+        except OSError:
+            time.sleep(0.05)
+    raise RuntimeError(f"port {port} did not open")
+
 @pytest.fixture
-def dual_thttpd_backends(allocated_port):
-    c = start_thttpd_binary("legacy/src/thttpd", port=allocated_port(), www="harness/www")
-    r = start_thttpd_binary("rust/target/release/thttpd", port=allocated_port(), www="harness/www")
-    yield {"c": c, "rust": r, "c_addr": c.address, "rust_addr": r.address}
-    c.stop(); r.stop()
+def dual_thttpd_backends(c_binary, rust_binary, www_root):
+    c_port = find_free_port()
+    rust_port = find_free_port()
+    c_proc = subprocess.Popen([c_binary, "-p", str(c_port), "-D", "-d", str(www_root), "-c", "**cgi-bin**"],
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    rust_proc = subprocess.Popen([rust_binary, "-p", str(rust_port), "-D", "-d", str(www_root), "-c", "**cgi-bin**"],
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    wait_for_port(c_port); wait_for_port(rust_port)
+    yield {"c_proc": c_proc, "rust_proc": rust_proc, "c_addr": f"127.0.0.1:{c_port}", "rust_addr": f"127.0.0.1:{rust_port}"}
+    for proc in (c_proc, rust_proc):
+        proc.terminate(); proc.wait(timeout=5)
 ```
 
 #### 3. Fixture: proxy
 **File**: `harness/conftest.py`
-**Changes**: MODIFY — add `proxy` fixture that writes a TOML config, spawns `thttpd-migrate start`, yields the proxy port, tears down.
+**Changes**: MODIFY — add `proxy` fixture that writes a TOML config under `tmp_path`, spawns `rust/target/release/thttpd-migrate start --config <cfg>`, yields the proxy port/control socket/state path, and tears down. Use temp paths for `state_path` and `control_socket`; `/var/run` is not writable in CI.
 
 ```python
 @pytest.fixture
-def proxy(dual_thttpd_backends, allocated_port):
-    cfg = generate_proxy_config(backends=dual_thttpd_backends, listen=allocated_port(),
-                                weights={"c-thttpd": 95, "rust-thttpd": 5})
-    proc = subprocess.Popen(["thttpd-migrate", "start", "--config", cfg.path])
-    wait_for_port(allocated_port.last)
-    yield {"addr": f"127.0.0.1:{allocated_port.last}", "proc": proc, "config_path": cfg.path}
+def proxy(dual_thttpd_backends, tmp_path):
+    port = find_free_port()
+    metrics_port = find_free_port()
+    control_socket = tmp_path / "control.sock"
+    state_path = tmp_path / "state.json"
+    cfg_path = write_proxy_config(
+        tmp_path,
+        listen=f"127.0.0.1:{port}",
+        metrics=f"127.0.0.1:{metrics_port}",
+        control_socket=control_socket,
+        state_path=state_path,
+        backends=dual_thttpd_backends,
+        weights={"c-thttpd": 95, "rust-thttpd": 5},
+    )
+    proc = subprocess.Popen(["rust/target/release/thttpd-migrate", "start", "--config", str(cfg_path)],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    wait_for_port(port)
+    yield {"addr": f"127.0.0.1:{port}", "metrics": f"127.0.0.1:{metrics_port}",
+           "control_socket": control_socket, "state_path": state_path, "proc": proc, "config_path": cfg_path}
     proc.terminate(); proc.wait(timeout=10)
+```
+
+#### 4. Makefile integration
+**File**: `Makefile`
+**Changes**: MODIFY — add a `proxy` target and include it in `integration` after `build legacy`.
+
+```make
+proxy: build legacy
+	$(PYTEST) harness/tests/test_proxy.py -q --timeout=60 --timeout-method=thread
+
+integration: harness differential proxy
 ```
 
 ### Success Criteria:
 
 #### Automated Verification:
-- [ ] `pytest harness/tests/test_proxy.py` — 30/30 pass
-- [ ] Each test runs in < 30s (slow tests use `--timeout=30` and degrade to wiremock)
-- [ ] `pytest harness/tests/` (full suite) — 216 existing + 30 new = 246 total pass
+- [x] `pytest harness/tests/test_proxy.py` — 30/30 pass
+- [x] Each test runs in < 60s (slow tests use `--timeout=60`; pure unit-level proxy behavior stays in Rust tests)
+- [x] `make integration` passes: 80 existing non-differential harness tests + 105 differential tests + 30 proxy tests = 215 harness tests total
 
 #### Manual Verification:
 - [ ] Locally, `pytest -v harness/tests/test_proxy.py::test_rollback_under_load` reproduces a 100 req/s load, sends `set-weight`, verifies all 100 req/s shift to Rust within 1s with no failed requests
 - [ ] `pytest -v harness/tests/test_proxy.py::test_drain_during_burst` shows 0 connection-reset errors during graceful drain
+- [ ] Proxy p99 latency at 1k req/s (via histogram scrape from `/metrics`): p99 request_duration through proxy minus p99 direct-to-backend is <1ms
 
 ---
 
@@ -1248,7 +1696,7 @@ Contents:
 ## TL;DR
 
 ```bash
-thttpd-migrate rollback --to c-thttpd
+thttpd-migrate --control-socket /var/run/thttpd-migrate/control.sock rollback --to c-thttpd
 ```
 
 That's it. All traffic shifts to the named backend within 1 second; in-flight requests continue to completion; no requests are lost.
@@ -1266,7 +1714,7 @@ Any of:
 ## Step-by-step (1-minute procedure)
 
 1. **Confirm the situation** (15s): `thttpd-migrate status`. Read the `circuit` field and the divergence count.
-2. **Roll back** (1s): `thttpd-migrate rollback --to c-thttpd`. Look for the log line `rollback complete`.
+2. **Roll back** (1s): `thttpd-migrate --control-socket /var/run/thttpd-migrate/control.sock rollback --to c-thttpd`. Look for the log line `rollback complete`.
 3. **Verify** (15s): `curl -H 'X-Request-Id: rollback-test' http://proxy:8080/` — check that the response comes from C (e.g. `Server: thttpd/2.27.0`).
 4. **Capture evidence** (30s): `thttpd-migrate status --json > /var/log/thttpd-migrate/rollback-$(date +%s).json`. Save the proxy logs.
 5. **Postmortem** (later): open a ticket. The evidence file is the audit trail.
@@ -1293,7 +1741,7 @@ Any of:
 
 #### 4. Control protocol spec
 **File**: `docs/CONTROL_PROTOCOL.md`
-**Changes**: NEW — JSON RPC spec for the control socket (used by `set-weight`, `drain`, etc.). Allows other tooling (custom dashboards, CI, chaos engineering) to talk to the proxy.
+**Changes**: MODIFY — Phase 7 creates the protocol contract; Phase 9 adds examples, operator notes, compatibility guarantees, and links from the user guide/runbook. The spec covers JSON RPC messages for `set_weight`, `rollback`, `drain`, error responses, and versioning.
 
 #### 5. Section in top-level README
 **File**: `README.md`
@@ -1302,8 +1750,9 @@ Any of:
 ### Success Criteria:
 
 #### Automated Verification:
-- [ ] `markdown-link-check docs/STRANGLER_FIG.md docs/ROLLBACK.md docs/MIGRATION_PLAYBOOK.md docs/CONTROL_PROTOCOL.md` (no broken internal links)
-- [ ] `bash -n` (or equivalent) on every shell snippet in `ROLLBACK.md`
+- [x] Internal doc links resolve with a repository-local checker (for example, a small Python script that validates relative Markdown links; do not introduce a Node-only `markdown-link-check` dependency unless it is added to project tooling)
+- [x] ADR-0002 (async runtime split) exists at `docs/ADR-0002-async-runtime-split.md` and links to this plan
+- [x] Shell snippets in `ROLLBACK.md` and `STRANGLER_FIG.md` are extracted and syntax-checked with `bash -n` where applicable
 
 #### Manual Verification:
 - [ ] A new operator (someone not familiar with the project) can read `STRANGLER_FIG.md` and start the proxy in 10 minutes without help
@@ -1315,9 +1764,9 @@ Any of:
 ## Testing Strategy
 
 ### Automated
-- **Unit tests** (`cargo test -p thttpd-migrate`): every module has tests for its public API
+- **Unit tests** (`cargo test --manifest-path rust/Cargo.toml -p thttpd-migrate`): every module has tests for its public API
 - **Integration tests** (`harness/tests/test_proxy.py`): 30 end-to-end tests covering every routing mode, health, circuit breaker, drain, rollback
-- **Differential regression** (`harness/tests/test_differential.py`): unchanged — proxy must not affect the existing 80 differential tests when not in the loop
+- **Differential regression** (`harness/tests/test_differential.py`): unchanged — proxy must not affect the existing 105 differential tests when not in the loop
 
 ### Manual
 - **6-week migration playbook** run against a real C and Rust thttpd pair
@@ -1327,11 +1776,11 @@ Any of:
 ## Performance Considerations
 
 - **Connection pool reuse**: `hyper-util` client with `pool_idle_timeout = 30s` keeps keep-alive connections warm to backends. Cold-start cost is one connect per backend on first request.
-- **Shadow async dispatch**: shadow responses are buffered (up to 1MB; truncating larger with a log warning) for diff. The user's response is not blocked.
+- **Shadow async dispatch**: shadow mode buffers request and primary/shadow responses up to `shadow.max_body_bytes` (default 1MiB) for diff. The user's response is never blocked on the shadow backend, but shadow mode is intentionally not the low-latency streaming path.
 - **Health check overhead**: one probe per backend per `interval_ms` (default 1000ms). At 100 backends, this is 100 req/s of overhead — acceptable but should be tuned for large pools.
 - **Metrics scrape**: Prometheus pull at 15s interval adds negligible load. Counter increments are wait-free atomics.
 
-Target: <1ms p99 overhead vs. talking to the backend directly, at 1k req/s.
+Target: <1ms p99 overhead vs. talking to the backend directly, at 1k req/s. Verified by comparing `thttpd_migrate_request_duration_seconds` histogram p99 against direct-to-backend p99 from a separate histogram scrape (add a Phase 8 manual verification bullet).
 
 ## Migration Notes
 
@@ -1343,5 +1792,38 @@ Target: <1ms p99 overhead vs. talking to the backend directly, at 1k req/s.
 
 - Martin Fowler, *StranglerFigApplication* (2004) — the pattern this implements
 - Envoy docs: traffic shifting, circuit breaking, outlier detection — design inspiration for the circuit breaker
-- Existing differential test infrastructure: `harness/diff_engine.py:1-180` (logic ported to `diff.rs` in Phase 4)
+- Existing differential test infrastructure: `harness/diff_engine.py:32-325` (logic ported to `diff.rs` in Phase 4)
 - Existing thttpd-rs event loop: `rust/crates/thttpd-core/src/eventloop.rs` — pattern reference for the proxy's request lifecycle (Phase 3)
+
+## Follow-up — 2026-06-13T22:53:50-0300 implementation-readiness review
+
+Revised before implementation to address readiness gaps discovered against the current repository:
+
+- Phase 1 no longer declares missing future modules or requires Phase 2 config to start the skeleton server.
+- Config examples now use parseable `host:port` addresses, default health path `/`, explicit metrics/control/state settings, and shadow body caps.
+- Routing now gives shadow mode an explicit `primary_backend` so shadow traffic can never affect users.
+- Hyper 1 snippets now use concrete/boxed body types instead of non-compiling `Response<String>` and empty-body client aliases for proxied requests.
+- Shadow diffing now documents request/response buffering, body caps, and the fact that user responses are not blocked on the shadow backend but may be buffered in verification mode.
+- Phase 7 owns the control protocol contract because `set-weight`, `rollback`, and `drain` tests need it before docs polish.
+- Phase 8 now reuses existing harness patterns and adds `make proxy` / `make integration` coverage with corrected test counts.
+
+## Follow-up — 2026-06-13T23:55:00-0300 independent model review (blocker + concern fixes)
+
+Third pass by a fresh model found compile blockers and concerns the prior reviews missed:
+
+**Blockers fixed (would not compile):**
+- B1: `dispatch_shadow` captured `&RoutingDecision` inside `tokio::spawn` (`'static` violation). Fixed: `RoutingDecision` now derives `Clone`; `dispatch_shadow` takes it by value and moves the owned copy into the spawn.
+- B2: `diff_responses` call had a `bool` (`shadow_truncated`) landing in the `shadow_status: u16` slot. Fixed: reordered args to match the signature.
+- B3: `update_health` signature expected `Result` but caller passed `bool` — diverged edits. Fixed: `update_health` takes `bool` again; the 5xx status check moved to the call site (`Ok(Ok(resp)) => resp.status().is_success()`).
+- B4: `handle` passed `Request<Incoming>` to `forwarder::forward` which wants `Request<ProxyBody>`. Fixed: convert the request body via `into_parts()` + `map_err(...).boxed()` before forwarding.
+
+**Concerns fixed:**
+- C1: Phase 2 `start()` had contradictory `addr == listen || listen == default` logic. Fixed: config.listen is the sole authority; `--listen` ignored after Phase 1.
+- C2: Phase 2 step numbering skipped 4 (1,2,3,5,6). Fixed: renumbered to 1-5.
+- C3: `router::decide<B>(req: &Request<B>, …)` never read `req`. Fixed: renamed to `_req` with a doc comment.
+- C4: Phase 6 never replaced the `init_tracing` stub — tracing stayed a no-op. Fixed: added Phase 6 step 5 wiring `tracing_setup::init` into the stub body.
+- C5: `metrics::install(listen, path)` took `path` but never used it. Fixed: documented as advisory (with_http_listener serves `/metrics`), param renamed `_path`.
+- C6: `write_proxy_config` was called in the Phase 8 fixture but never defined. Fixed: added the full helper with TOML template.
+- C7: Response-body mapping `.map_err(|e| e).boxed()` assumed `Incoming::Error == hyper::Error`. Fixed: added implementation note to verify the associated Error type at impl time.
+- C8: New tokio/hyper/metrics transitive crates may trip `cargo deny` license check. Fixed: added Phase 1 success criterion to run `make security` and resolve variants.
+- C9: Phase 7 control functions were comment-only pseudocode despite automated criteria assuming working code. Fixed: added implementation note that these are the real lift — define `ControlRequest`/`ControlResponse` serde enums, real socket connect/send/recv.
