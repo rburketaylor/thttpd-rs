@@ -723,3 +723,171 @@ def dual_server_process_with_throttle(c_binary, rust_binary, www_root_session, t
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait(timeout=2)
+
+
+# ======================================================================
+# thttpd-migrate proxy fixtures (Phase 8 integration tests)
+# ======================================================================
+
+def wait_for_port(port, timeout=5.0):
+    """Block until a TCP port on 127.0.0.1 accepts connections."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                return
+        except OSError:
+            time.sleep(0.05)
+    raise RuntimeError(f"port {port} did not open")
+
+
+@pytest.fixture
+def dual_thttpd_backends(c_binary, rust_binary, www_root_session):
+    """Start both C and Rust thttpd on ephemeral ports serving the same www root.
+
+    Both servers serve identical content, so shadow diffing should report zero
+    divergences. Yields a dict with process handles and addresses.
+    """
+    c_port = find_free_port()
+    rust_port = find_free_port()
+    c_proc = subprocess.Popen(
+        [c_binary, "-p", str(c_port), "-D", "-d", str(www_root_session), "-c", "**cgi-bin**"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    rust_proc = subprocess.Popen(
+        [rust_binary, "-p", str(rust_port), "-D", "-d", str(www_root_session), "-c", "**cgi-bin**"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    wait_for_port(c_port)
+    wait_for_port(rust_port)
+    yield {
+        "c_proc": c_proc, "rust_proc": rust_proc,
+        "c_addr": f"127.0.0.1:{c_port}", "rust_addr": f"127.0.0.1:{rust_port}",
+    }
+    for proc in (c_proc, rust_proc):
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=2)
+
+
+def _proxy_binary():
+    """Locate the thttpd-migrate binary (release, falling back to debug)."""
+    here = os.path.dirname(__file__)
+    for candidate in (
+        os.path.join(here, "..", "rust", "target", "release", "thttpd-migrate"),
+        os.path.join(here, "..", "rust", "target", "debug", "thttpd-migrate"),
+    ):
+        path = os.path.abspath(candidate)
+        if os.path.exists(path):
+            return path
+    pytest.skip("thttpd-migrate binary not built; run `make build`")
+
+
+def _short_socket_path(label="control"):
+    """Return a short Unix-socket path under /tmp.
+
+    macOS limits Unix socket paths to SUN_LEN (104) bytes; pytest's tmp_path
+    is deeper than that, so the control socket must live under /tmp.
+    """
+    import random
+    return f"/tmp/thttpd-migrate-{label}-{os.getpid()}-{random.randint(0, 1<<30)}.sock"
+
+
+def write_proxy_config(tmp_path, listen, metrics, control_socket, state_path,
+                       backends, weights, mode="active-active",
+                       primary=None, shadow=None):
+    """Render a thttpd-migrate TOML config to tmp_path and return its path."""
+    c_addr = backends["c_addr"]
+    rust_addr = backends["rust_addr"]
+    c_w, rust_w = weights["c-thttpd"], weights["rust-thttpd"]
+    lines = [
+        f'listen = "{listen}"',
+        'log_level = "info"',
+        f'state_path = "{state_path}"',
+        f'control_socket = "{control_socket}"',
+        "",
+        "[metrics]",
+        f'listen = "{metrics}"',
+        'path = "/metrics"',
+        "",
+        "[shadow]",
+        "max_body_bytes = 1048576",
+        "",
+        "[backends.c-thttpd]",
+        f'address = "{c_addr}"',
+        f"weight = {c_w}",
+        'health_path = "/"',
+        "",
+        "[backends.rust-thttpd]",
+        f'address = "{rust_addr}"',
+        f"weight = {rust_w}",
+        'health_path = "/"',
+        "",
+        "[routing]",
+        f'mode = "{mode}"',
+    ]
+    if primary:
+        lines.append(f'primary_backend = "{primary}"')
+    if shadow:
+        lines.append(f'shadow_backend = "{shadow}"')
+    lines.append('exclude_paths = ["/metrics"]')
+    cfg_path = tmp_path / "thttpd-migrate.toml"
+    cfg_path.write_text("\n".join(lines) + "\n")
+    return cfg_path
+
+
+@pytest.fixture
+def proxy(dual_thttpd_backends, tmp_path):
+    """Start the migration proxy on an ephemeral port and yield its handles.
+
+    Writes a temp config, spawns the proxy, waits for it to listen, and tears
+    down on exit. Yields a dict with addr, metrics, control_socket, state_path,
+    proc, and config_path.
+    """
+    port = find_free_port()
+    metrics_port = find_free_port()
+    control_socket = _short_socket_path()
+    state_path = str(tmp_path / "state.json")
+    bin_path = _proxy_binary()
+    cfg_path = write_proxy_config(
+        tmp_path,
+        listen=f"127.0.0.1:{port}",
+        metrics=f"127.0.0.1:{metrics_port}",
+        control_socket=control_socket,
+        state_path=state_path,
+        backends=dual_thttpd_backends,
+        weights={"c-thttpd": 95, "rust-thttpd": 5},
+    )
+    proc = subprocess.Popen(
+        [bin_path, "start", "--config", str(cfg_path)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    try:
+        wait_for_port(port)
+    except Exception:
+        out, err = proc.communicate(timeout=2)
+        pytest.fail(f"proxy did not start: stdout={out!r} stderr={err!r}")
+    yield {
+        "addr": f"127.0.0.1:{port}",
+        "port": port,
+        "metrics": f"127.0.0.1:{metrics_port}",
+        "control_socket": control_socket,
+        "state_path": state_path,
+        "proc": proc,
+        "config_path": str(cfg_path),
+        "bin": bin_path,
+        "backends": dual_thttpd_backends,
+    }
+    proc.terminate()
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=5)
+    try:
+        os.unlink(control_socket)
+    except OSError:
+        pass
