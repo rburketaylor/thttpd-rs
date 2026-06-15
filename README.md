@@ -121,6 +121,19 @@ The reusable method is documented in
 [docs/REFACTOR_PLAYBOOK.md](docs/REFACTOR_PLAYBOOK.md). The five-minute project
 walkthrough is in [docs/INTERVIEW_DEMO.md](docs/INTERVIEW_DEMO.md).
 
+## Migration Tools
+
+`thttpd-migrate` is a strangler-fig migration proxy that shifts traffic from
+the C `thttpd` to the Rust `thttpd-rs` incrementally — active-active canary,
+shadow diffing, health checks, circuit breaker, and one-command rollback —
+without modifying either server.
+
+- User guide & architecture: [docs/STRANGLER_FIG.md](docs/STRANGLER_FIG.md)
+- Rollback runbook: [docs/ROLLBACK.md](docs/ROLLBACK.md)
+- Week-by-week plan: [docs/MIGRATION_PLAYBOOK.md](docs/MIGRATION_PLAYBOOK.md)
+- Control-socket protocol: [docs/CONTROL_PROTOCOL.md](docs/CONTROL_PROTOCOL.md)
+- Async-runtime decision: [docs/ADR-0002-async-runtime-split.md](docs/ADR-0002-async-runtime-split.md)
+
 ## License
 
 The original thttpd is BSD 2-Clause licensed by Jef Poskanzer. The Rust port
