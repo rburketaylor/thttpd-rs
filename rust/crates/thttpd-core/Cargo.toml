@@ -20,7 +20,6 @@ thttpd-tdate = { workspace = true }
 clap = { workspace = true }
 mio = { workspace = true }
 signal-hook = { workspace = true }
-signal-hook-mio = { workspace = true }
 nix = { workspace = true }
 libc = { workspace = true }
 slab = { workspace = true }
