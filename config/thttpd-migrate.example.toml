@@ -8,7 +8,7 @@ control_socket = "/var/run/thttpd-migrate/control.sock"
 
 [metrics]
 listen = "127.0.0.1:9100"
-path = "/metrics"
+path = "/metrics"          # advisory today; exporter serves /metrics
 
 [shadow]
 max_body_bytes = 1048576

@@ -3,3 +3,4 @@ source: legacy/src/tdate_parse.c
 rust_crate: thttpd-tdate
 status: migrated
 dependencies: []
+rust_lines: 236

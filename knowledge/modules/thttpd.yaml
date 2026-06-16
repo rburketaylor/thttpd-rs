@@ -3,3 +3,12 @@ source: legacy/src/thttpd.c
 rust_crate: thttpd-core
 status: migrated
 dependencies: [libhttpd, fdwatch, timers, mmc]
+modules:
+  - main
+  - eventloop
+  - startup
+  - server
+  - connection
+  - signal
+  - throttle
+  - config

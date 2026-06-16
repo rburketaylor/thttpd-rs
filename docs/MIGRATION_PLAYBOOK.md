@@ -6,7 +6,7 @@ mediated by the `thttpd-migrate` strangler-fig proxy.
 ## Guiding principles
 
 - **Never lose traffic.** Every step is reversible in one command
-  (`rollback --to c-thttpd`).
+  (`rollback --to c-thttpd`), and in-flight requests continue normally.
 - **Verify before you shift.** Shadow mode proves equivalence before any user
   sees a Rust response.
 - **Ramp, don't flip.** Increase Rust weight gradually; watch metrics at each
@@ -73,4 +73,5 @@ No matter the week:
 thttpd-migrate --control-socket /var/run/thttpd-migrate/control.sock rollback --to c-thttpd
 ```
 
-Within 1 second all traffic returns to C. See `docs/ROLLBACK.md`.
+New backend selections return to C immediately; in-flight requests continue on
+the backend that already accepted them. See `docs/ROLLBACK.md`.

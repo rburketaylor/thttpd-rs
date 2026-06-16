@@ -16,14 +16,15 @@ behavior:
 
 ## Verification
 
-The repository currently contains **343 automated tests**:
+The repository currently contains **472 automated tests**:
 
 | Layer | Tests | Purpose |
 |---|---:|---|
 | C-vs-Rust differential scenarios | 105 | Compare externally observable request behavior |
 | Legacy C harness scenarios | 80 | Prove fixtures and scenarios against the reference server |
-| Rust unit tests | 95 | Verify parser, protocol, cache, timer, auth, and configuration internals |
+| Rust workspace unit tests | 193 | Verify server and proxy internals, including parser, protocol, cache, timer, auth, routing, shadow diffing, health, and control-plane behavior |
 | Comparator unit tests | 63 | Prove that the differential oracle detects meaningful drift |
+| Proxy integration tests | 31 | Exercise `thttpd-migrate` routing, shadowing, health, circuit breaker, rollback, metrics, and drain behavior |
 
 Run the complete gate with:
 
@@ -34,8 +35,8 @@ make verify
 ```
 
 `make check` runs the fast formatting, lint, unit, comparator, and knowledge
-checks. `make integration` builds both implementations and runs the C-only and
-differential suites.
+checks. `make integration` builds both implementations and runs `harness`,
+`differential`, and `proxy` integration suites.
 
 ## Comparison Strictness
 
@@ -124,9 +125,11 @@ walkthrough is in [docs/INTERVIEW_DEMO.md](docs/INTERVIEW_DEMO.md).
 ## Migration Tools
 
 `thttpd-migrate` is a strangler-fig migration proxy that shifts traffic from
-the C `thttpd` to the Rust `thttpd-rs` incrementally — active-active canary,
-shadow diffing, health checks, circuit breaker, and one-command rollback —
-without modifying either server.
+the C `thttpd` to the Rust `thttpd-rs` incrementally. It ships active-active
+and canary routing, shadow mirroring with response diffing, active health
+checks, a circuit breaker, Prometheus `/metrics`, request-id propagation, a Unix
+control socket, one-command rollback, and graceful drain without modifying
+either server.
 
 - User guide & architecture: [docs/STRANGLER_FIG.md](docs/STRANGLER_FIG.md)
 - Rollback runbook: [docs/ROLLBACK.md](docs/ROLLBACK.md)

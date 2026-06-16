@@ -64,24 +64,33 @@ thttpd-migrate status --state /var/run/thttpd-migrate/state.json
 | `shadow` | Primary serves every request; shadow (Rust) receives a mirror and responses are diffed; **the user is never affected** | Pre-rollout correctness verification |
 
 In **shadow mode**, `routing.primary_backend` is always served and
-`routing.shadow_backend` receives a mirrored copy. Divergences are logged and
-counted in `thttpd_migrate_shadow_divergences_total` but never reach the client.
+`routing.shadow_backend` receives a mirrored copy only when that backend is
+healthy/routable and admitted by its circuit breaker. Divergences are logged
+and counted in `thttpd_migrate_shadow_divergences_total` but never reach the
+client.
 
 ## Health & circuit breaker
 
 - **Active health checks**: each backend's `health_path` is probed every
   `health.interval_ms`. `failure_threshold` consecutive failures mark a backend
-  `Unhealthy`; `success_threshold` consecutive successes restore it. Unhealthy
-  backends are excluded from routing.
+  `Unhealthy`; `success_threshold` consecutive successes restore it. A health
+  probe succeeds only on a 2xx response. 4xx, 5xx, timeouts, and connect/request
+  errors are failures. Unhealthy backends are excluded from routing.
 - **Circuit breaker**: a per-backend rolling window trips (opens) when the error
   rate exceeds `circuit_breaker.error_rate_threshold` *and* the request volume
-  reaches `circuit_breaker.min_requests`. After a cool-off it half-opens for a
-  single probe; success closes it, failure re-opens it.
+  reaches `circuit_breaker.min_requests`. The cool-off is fixed at 5 seconds;
+  after that it half-opens for a single probe. Success closes it, failure
+  re-opens it.
+- **Shadow rollback**: rollback sets the target backend's weight to 100 and all
+  others to 0. In shadow mode it also updates the live `primary_backend` to the
+  rollback target and moves the previous primary into `shadow_backend`.
 
 ## Observability — what to alert on
 
 Prometheus metrics are served on the configured metrics listener
-(`127.0.0.1:9100/metrics` by default), separate from the data plane:
+(`127.0.0.1:9100/metrics` by default), separate from the data plane. The
+`metrics.path` config field is currently advisory; the Prometheus exporter
+serves `/metrics`.
 
 | Metric | Alert when |
 |---|---|
@@ -97,7 +106,7 @@ echoed back). Structured logs go to stderr; set
 
 | Symptom | Action |
 |---|---|
-| Rust canary returns 5xx | `rollback --to c-thttpd` (1s, no traffic loss). See `ROLLBACK.md`. |
+| Rust canary returns 5xx | `rollback --to c-thttpd`; new selections move to C while in-flight requests continue normally. See `ROLLBACK.md`. |
 | Shadow divergences appear | Inspect logs for the `field` and `request_id`; fix Rust before ramping. |
 | Proxy itself is unhealthy | Bypass it: point DNS/load balancer at C's port directly. |
 

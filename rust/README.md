@@ -1,8 +1,11 @@
 # thttpd-rs — Rust Workspace
 
-A behavior-preserving Rust port of sthttpd 2.27.0, exercised by 105
-differential scenarios against the original C binary. Deterministic values are
-compared exactly; documented nondeterministic values are normalized explicitly.
+A behavior-preserving Rust port of sthttpd 2.27.0 plus the `thttpd-migrate`
+strangler-fig proxy. The server is exercised by 105 differential scenarios
+against the original C binary; the proxy has its own integration suite for
+routing, shadowing, health, rollback, metrics, and drain behavior.
+Deterministic values are compared exactly; documented nondeterministic values
+are normalized explicitly.
 
 ## Crate Map
 
@@ -15,6 +18,9 @@ thttpd-core          main(), event loop, signals, throttling, config
 │   └── thttpd-tdate     HTTP date parsing (RFC 1123/850/asctime)
 ├── thttpd-fdwatch    I/O multiplexing (thin mio wrapper)
 └── thttpd-timers     BinaryHeap timer wheel
+
+thttpd-migrate       async migration proxy: routing, forwarding, shadow diffing,
+                     health, circuit breaker, metrics, state, control socket
 ```
 
 ## Crates
@@ -29,6 +35,7 @@ thttpd-core          main(), event loop, signals, throttling, config
 | `thttpd-match` | `match.c` | Shell-style glob pattern matching |
 | `thttpd-tdate` | `tdate_parse.c` | HTTP date parsing (3 formats) |
 | `thttpd-mime` | `mime_types.h` | MIME type and encoding lookup tables |
+| `thttpd-migrate` | new migration tooling | Strangler-fig proxy for active-active/canary routing, shadow diffing, health, circuit breaker, metrics, rollback, and drain |
 
 ## Building
 
@@ -43,9 +50,10 @@ cargo build --release
 cargo test --workspace
 ```
 
-## Architecture
+## Server Architecture
 
-Single-threaded, event-driven, no async runtime. The server uses `mio` directly with a manual poll loop:
+The `thttpd-core` server is single-threaded, event-driven, and has no async
+runtime. It uses `mio` directly with a manual poll loop:
 
 ```
 poll() → accept connections
@@ -59,6 +67,10 @@ This deliberately matches thttpd's original architecture. Operational gaps are
 tracked in `../docs/KNOWN_DEVIATIONS.md` rather than hidden behind a drop-in
 replacement claim.
 
+`thttpd-migrate` is intentionally separate migration tooling. It uses
+`tokio`/`hyper` because proxying many client and backend connections is
+naturally concurrent; see `../docs/ADR-0002-async-runtime-split.md`.
+
 ## Key Dependencies
 
 | Crate | Purpose |
@@ -70,3 +82,4 @@ replacement claim.
 | `signal-hook` | SIGTERM/SIGINT/SIGHUP handling |
 | `slab` | O(1) connection table allocator |
 | `thiserror` | Typed error enums |
+| `tokio` / `hyper` | Async proxy runtime for `thttpd-migrate` |

@@ -3,3 +3,4 @@ source: legacy/src/mmc.c
 rust_crate: thttpd-mmc
 status: migrated
 dependencies: []
+rust_lines: 207

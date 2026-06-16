@@ -47,8 +47,8 @@ backend's weight becomes 0. It does **not** use sentinel `u32::MAX` weights.
 ```
 
 Sets the drain flag; the proxy stops accepting new connections and lets in-flight
-requests finish. The `timeout_secs` is advisory (the process lifetime /
-SIGTERM governs the hard bound).
+requests finish. `timeout_secs` sets the enforced grace period for that drain:
+after it expires, any remaining connection tasks are aborted.
 
 ### `snapshot`
 

@@ -36,6 +36,12 @@ modules:
     dependencies: []
   - name: mime
     source: legacy/src/mime_types.h
+    sources: [legacy/src/mime_types.h, legacy/src/mime_encodings.h]
     rust_crate: thttpd-mime
     status: migrated
+    dependencies: []
+  - name: thttpd_migrate
+    source: rust/crates/thttpd-migrate/src/lib.rs
+    rust_crate: thttpd-migrate
+    status: implemented
     dependencies: []

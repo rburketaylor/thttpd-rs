@@ -1,7 +1,7 @@
 # tdate_parse — HTTP Date Parsing
 
 ## Source
-`legacy/src/tdate_parse.c` (330 lines) → `rust/crates/thttpd-tdate/src/lib.rs` (228 lines)
+`legacy/src/tdate_parse.c` (330 lines) → `rust/crates/thttpd-tdate/src/lib.rs` (236 lines)
 
 ## Status
 Migrated. 105 differential scenarios pass.

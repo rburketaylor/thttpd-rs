@@ -1,7 +1,7 @@
 # mmc — Memory-Mapped File Cache
 
 ## Source
-`legacy/src/mmc.c` (529 lines) → `rust/crates/thttpd-mmc/src/lib.rs` (200 lines)
+`legacy/src/mmc.c` (529 lines) → `rust/crates/thttpd-mmc/src/lib.rs` (207 lines)
 
 ## Status
 Migrated. 105 differential scenarios pass.

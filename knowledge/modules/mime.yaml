@@ -1,5 +1,8 @@
 name: mime
 source: legacy/src/mime_types.h
+sources:
+  - legacy/src/mime_types.h
+  - legacy/src/mime_encodings.h
 rust_crate: thttpd-mime
 status: migrated
 dependencies: []

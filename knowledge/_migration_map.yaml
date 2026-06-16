@@ -42,7 +42,7 @@ migrations:
     rust_crate: thttpd-http
     status: verified
     parity: "request scenarios verified"
-    notes: "Split into parse, response, cgi, dirlist, conn, method, url, error modules. 105 differential scenarios pass."
+    notes: "Split into parse, response, auth, cgi, dirlist, conn, method, url, error modules. 105 differential scenarios pass."
 
   - c_module: thttpd.c
     rust_crate: thttpd-core
@@ -50,10 +50,17 @@ migrations:
     parity: "partial operational parity"
     notes: "Event loop, startup, signals, and config are implemented. Runtime throttle enforcement and other operational deviations are tracked separately."
 
+  - c_module: thttpd_migrate
+    rust_crate: thttpd-migrate
+    status: implemented
+    parity: "proxy integration verified"
+    notes: "New strangler-fig migration proxy. Active-active/canary routing, shadow diffing, health checks, circuit breaker, metrics, state, control socket, rollback, and drain are covered by 31 proxy integration tests."
+
 test_summary:
   differential_tests: 105
   harness_tests: 80
-  rust_unit_tests: 95
+  rust_unit_tests: 193
   comparator_unit_tests: 63
-  total: 343
+  proxy_integration_tests: 31
+  total: 472
   failing: 0

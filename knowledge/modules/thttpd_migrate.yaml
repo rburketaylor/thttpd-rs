@@ -1,0 +1,20 @@
+name: thttpd_migrate
+source: rust/crates/thttpd-migrate/src/lib.rs
+rust_crate: thttpd-migrate
+status: implemented
+dependencies: []
+rust_lines: 6003
+modules:
+  - backend
+  - circuit
+  - config
+  - control
+  - diff
+  - forwarder
+  - health
+  - metrics
+  - router
+  - server
+  - shadow
+  - state
+  - tracing_setup

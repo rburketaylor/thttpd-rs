@@ -28,7 +28,7 @@ It does not yet provide:
 - bounded stdout/stderr capture
 - operating-system resource limits
 - filesystem or syscall sandboxing
-- concurrency enforcement for `cgilimit`
+- runtime concurrency enforcement for parsed `cgilimit`
 
 These are recorded as operational deviations rather than hidden behind the
 request-parity result. A hardened deployment should use a supervisor or sandbox

@@ -6,8 +6,9 @@
 thttpd-migrate --control-socket /var/run/thttpd-migrate/control.sock rollback --to c-thttpd
 ```
 
-That's it. All traffic shifts to the named backend within 1 second; in-flight
-requests continue to completion; no requests are lost.
+That's it. The live routing state is updated immediately for new backend
+selections; in-flight requests continue normally on the backend that already
+accepted them.
 
 ## When to use this
 
@@ -23,7 +24,7 @@ issue.
 ## Step-by-step (1-minute procedure)
 
 1. **Confirm the situation** (15s): `thttpd-migrate status --state /var/run/thttpd-migrate/state.json`. Read the `weight=` and `health=` fields.
-2. **Roll back** (1s): `thttpd-migrate --control-socket /var/run/thttpd-migrate/control.sock rollback --to c-thttpd`. Look for `rolled back to c-thttpd`.
+2. **Roll back**: `thttpd-migrate --control-socket /var/run/thttpd-migrate/control.sock rollback --to c-thttpd`. Look for `rolled back to c-thttpd`.
 3. **Verify** (15s): `curl -H 'X-Request-Id: rollback-test' http://proxy:8080/` — confirm the response comes from C (e.g. `Server: thttpd/...`).
 4. **Capture evidence** (30s): save `state.json` and the proxy logs.
 5. **Postmortem** (later): open a ticket. The state file and logs are the audit trail.

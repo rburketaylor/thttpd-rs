@@ -42,6 +42,6 @@ runs shadow diffing, health probing, and a control plane — all concurrently.
 
 ## References
 
-- Implementation plan: `.rpiv/artifacts/plans/2026-06-12_16-30-00_strangler-fig-proxy.md`
+- Implementation: `rust/crates/thttpd-migrate`
 - Martin Fowler, *StranglerFigApplication* (2004)
 - User guide: `docs/STRANGLER_FIG.md`

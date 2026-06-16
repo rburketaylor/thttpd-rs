@@ -1,7 +1,7 @@
 # timers — Timer Wheel
 
 ## Source
-`legacy/src/timers.c` (403 lines) → `rust/crates/thttpd-timers/src/lib.rs` (253 lines)
+`legacy/src/timers.c` (403 lines) → `rust/crates/thttpd-timers/src/lib.rs` (266 lines)
 
 ## Status
 Migrated. 105 differential scenarios pass.

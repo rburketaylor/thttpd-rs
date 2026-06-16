@@ -3,3 +3,14 @@ source: legacy/src/libhttpd.c
 rust_crate: thttpd-http
 status: migrated
 dependencies: [match, mmc, tdate_parse]
+modules:
+  - parse
+  - parse_state
+  - conn
+  - auth
+  - response
+  - cgi
+  - dirlist
+  - method
+  - url
+  - error

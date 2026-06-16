@@ -3,3 +3,4 @@ source: legacy/src/timers.c
 rust_crate: thttpd-timers
 status: migrated
 dependencies: []
+rust_lines: 266

@@ -1,6 +1,7 @@
 # thttpd-rs Migration Roadmap
 
-> Fifteen additions to round thttpd-rs into a production-ready migration artifact.
+> Migration artifact status for thttpd-rs: what has shipped, what remains, and
+> how the remaining additions round out the production story.
 > This document is the answer to the question every interviewer hiring for a
 > stack migration will eventually ask: *"How would you actually do this?"*
 
@@ -16,6 +17,11 @@ foundation everything below builds on:
 - **Knowledge graph** under `knowledge/` — every C file mapped to its Rust
   equivalent with `file:line` evidence
 - **CI** — build + unit tests + harness + differential + knowledge validation
+- **Strangler-fig proxy** — `thttpd-migrate` ships active-active/canary routing,
+  shadow diffing, active health checks, a circuit breaker, request IDs,
+  Prometheus `/metrics`, a control socket, rollback, and drain
+- **Proxy integration gate** — 31 tests cover proxy routing, shadow mode,
+  health, circuit breaker, rollback, metrics, and drain behavior
 - **JOURNEY.md** — the migration case study (the doc that proves behavioral
   gates, not structural ones, were used)
 
@@ -26,9 +32,9 @@ behavior under an explicit normalization policy instead of settling for
 
 ## How the additions are prioritized
 
-The fifteen additions below are grouped by the question they answer in an
-interview context. The list is opinionated: the top of Tier S is what to build
-first, the bottom of Tier B is what to build only if everything else is done.
+The additions below are grouped by the question they answer in an interview
+context. The migration proxy, proxy observability, and rollback runbook are now
+shipped; the remaining work starts from that baseline.
 
 | Tier | Interview question it answers | Time to ship |
 |------|-------------------------------|--------------|
@@ -36,18 +42,18 @@ first, the bottom of Tier B is what to build only if everything else is done.
 | **A** | "How do you know the new system is *better*, not just different?" | half-day to 2 days each |
 | **B** | "What about polish — docs, tests, release discipline?" | afternoon each |
 
-Build order: Tier S items 1-5 first, in the order below, then Tier A. Tier B
-items are independent and can ship whenever.
+Build order: maintain the shipped Tier S controls, then add the remaining Tier
+S production artifacts before Tier A. Tier B items are independent and can ship
+whenever.
 
 ---
 
-## Tier S — build first
+## Shipped Migration Controls
 
-These five directly answer "how do you migrate a running system?" — the
-question that distinguishes migration engineers from people who can translate
-C to Rust.
+These pieces now answer the "how do you migrate a running system?" question
+directly and are covered by the repository's automated gates.
 
-### 1. Strangler-fig migration proxy
+### 1. Strangler-fig migration proxy — implemented
 
 **What:** a new `thttpd-migrate` binary that sits in front of both servers
 and lets you shift traffic C → Rust in any ratio, including 0% (shadow only).
@@ -56,12 +62,35 @@ one-command rollback.
 
 **Why it matters:** this is *the* canonical migration pattern. The first
 follow-up question after "I ported it" is "how do you switch over?" The
-honest answer is "incrementally, with the ability to revert in 30 seconds" —
+honest answer is "incrementally, with the ability to revert quickly" —
 and this proxy is the artifact that proves you can do it.
 
-**Status:** plan written → `.rpiv/artifacts/plans/2026-06-12_16-30-00_strangler-fig-proxy.md`
+**Status:** implemented in `rust/crates/thttpd-migrate`, documented in
+`docs/STRANGLER_FIG.md`, and covered by 31 proxy integration tests.
 
-### 2. Old `thttpd.conf` compatibility shim
+### 2. Observability — `tracing` + `/metrics` — implemented
+
+**What:** structured logging, request-id propagation, and Prometheus metrics
+for requests, durations, backend 5xx responses, and shadow divergences.
+
+**Status:** implemented in the proxy. The exporter serves `/metrics`; the
+configured `metrics.path` is currently advisory.
+
+### 3. Rollback runbook — implemented
+
+**What:** one-command rollback via the control socket plus a documented runbook.
+Rollback updates routing immediately for new selections while in-flight
+requests continue normally.
+
+**Status:** implemented as `rollback --to ...` and documented in
+`docs/ROLLBACK.md` and `docs/CONTROL_PROTOCOL.md`.
+
+## Tier S — remaining production migration work
+
+The proxy/runbook/observability core is shipped. These are the highest-value
+remaining productionization items.
+
+### 4. Old `thttpd.conf` compatibility shim
 
 **What:** complete the new legacy `thttpd.conf` parser. Supported directives
 already load directly; unsupported directives fail with actionable errors.
@@ -74,7 +103,7 @@ tax the migration doesn't need to levy.
 
 **Effort:** ~half a day, plus configuration-option coverage analysis.
 
-### 3. Criterion benchmarks — C vs Rust
+### 5. Criterion benchmarks — C vs Rust
 
 **What:** `rust/benches/` with `criterion` benches for the hot paths (HTTP
 parse, mmap cache lookup, glob match, timer tick, throttle calc), plus a
@@ -87,7 +116,7 @@ ends the "but is Rust actually faster?" debate in the room.
 
 **Effort:** 1 day including the C harness.
 
-### 4. Production deployment artifacts
+### 6. Production deployment artifacts
 
 **What:** multi-stage `Dockerfile` (cargo-chef for caching, distroless/scratch
 final, non-root, read-only fs), `docker-compose.yml` for local dev, Helm
@@ -100,26 +129,13 @@ port is a curiosity, not a candidate.
 
 **Effort:** 1-2 days.
 
-### 5. Observability — `tracing` + `/metrics`
-
-**What:** add `tracing` + `tracing-subscriber` (JSON for prod, pretty for
-dev), a request-spanning middleware, and a Prometheus `/metrics` endpoint
-exposing connections, request duration histogram, bytes served, throttle
-drops, divergence counts.
-
-**Why it matters:** real migrations operate in prod with dashboards. Without
-this, the server is a black box — no one can tell you why it's slow, no one
-can page on it, no one can tell if a canary release is going well.
-
-**Effort:** 1 day.
-
 ---
 
 ## Tier A — strong differentiators
 
 These prove the new system is *better* than the old one, not just *different*.
 
-### 6. Security comparison report + CI
+### 7. Security comparison report + CI
 
 **What:** a public `docs/security/MIGRATION_REPORT.md` that maps every
 historical CVE in `sthttpd` / `thttpd` to its CWE class and to the Rust
@@ -133,7 +149,7 @@ CI" — is not.
 
 **Status:** plan written → `.rpiv/artifacts/plans/2026-06-12_16-30-00_security-report.md`
 
-### 7. `cargo-fuzz` harness on the HTTP parser
+### 8. `cargo-fuzz` harness on the HTTP parser
 
 **What:** `fuzz/fuzz_targets/parse_request.rs` (and `parse_url.rs`,
 `parse_header.rs`). Differential tests prove C and Rust agree on *known*
@@ -146,7 +162,7 @@ through CVE postmortems recognize it.
 
 **Effort:** half a day to set up, then incrementally add targets.
 
-### 8. Architecture Decision Records
+### 9. Architecture Decision Records
 
 **What:** `knowledge/decisions/` with MADR-format ADRs: why `mio` not
 `tokio`, why preserve the single-threaded event loop, why behavior-first parity
@@ -159,17 +175,6 @@ evaluating a codebase. Pairing an ADR with the existing `knowledge/`
 structure is a natural fit.
 
 **Effort:** half a day to bootstrap the format; one hour per ADR.
-
-### 9. Rollback runbook
-
-**What:** `docs/runbooks/ROLLBACK.md` — a 30-second-revert procedure
-(feature flag → drain → swap → verify → postmortem). Mirrored as a
-`thttpd-migrate rollback --to c` CLI command. Plus a postmortem template.
-
-**Why it matters:** real migrations die without a documented escape hatch.
-Writing one shows you've been paged at 3 AM and learned from it.
-
-**Effort:** half a day (most of the time is writing the postmortem template).
 
 ### 10. Load tests + slow-loris chaos
 
@@ -231,15 +236,15 @@ unless noted.
 
 | # | Item | Depends on | Why this order |
 |---|------|-----------|----------------|
-| 1 | **ADRs** (#8) | — | Foundational. Informs every other plan. Half a day. |
-| 2 | **Strangler-fig proxy** (#1) | ADR on `mio`/`tokio` split | Plan is already written. Builds the new binary; the most impressive single deliverable. |
-| 3 | **Security report + CI** (#6) | — | Plan is already written. Establishes the safety-with-receipts story in CI from day 1. |
-| 4 | **Criterion benchmarks** (#3) | — | Empirical data backs every future claim. The "4× more compact" line becomes "p99 0.4ms vs 0.6ms at 1k req/s." |
-| 5 | **Observability** (#5) | — | Required for the proxy and the container work. |
-| 6 | **Container + k8s** (#4) | #5 (observability) | Deployable Monday. |
-| 7 | **Config shim** (#2) | — | Independent. |
-| 8 | **Rollback runbook** (#9) | #2 (strangler proxy CLI) | Documents the proxy's escape hatch. |
-| 9 | **cargo-fuzz** (#7) | — | Independent. Adds to security story. |
+| 1 | **ADRs** (#9) | — | Foundational. Informs every other plan. Half a day. |
+| 2 | **Strangler-fig proxy** (#1) | ADR on `mio`/`tokio` split | Shipped. Keep it in the demo path and maintain the proxy integration gate. |
+| 3 | **Security report + CI** (#7) | — | Plan is already written. Establishes the safety-with-receipts story in CI from day 1. |
+| 4 | **Criterion benchmarks** (#5) | — | Empirical data backs every future claim. The "4× more compact" line becomes "p99 0.4ms vs 0.6ms at 1k req/s." |
+| 5 | **Observability** (#2) | — | Shipped for the proxy; extend with any server-specific metrics as needed. |
+| 6 | **Container + k8s** (#6) | #2 (observability) | Deployable Monday. |
+| 7 | **Config shim** (#4) | — | Independent. |
+| 8 | **Rollback runbook** (#3) | #2 (strangler proxy CLI) | Shipped with the proxy control plane. |
+| 9 | **cargo-fuzz** (#8) | — | Independent. Adds to security story. |
 | 10 | **Load tests** (#10) | #1 (strangler proxy) | Proves the proxy works under load. |
 | 11 | **proptest** (#13) | — | Quick wins on pure functions. |
 | 12 | **cargo-mutants** (#12) | — | Independent. |
@@ -256,15 +261,15 @@ concrete story the interviewer will remember after the conversation.
 
 | # | Item | Status | Plan |
 |---|------|--------|------|
-| 1 | Strangler-fig proxy | planned | [link](.rpiv/artifacts/plans/2026-06-12_16-30-00_strangler-fig-proxy.md) |
-| 2 | Config shim | todo | — |
-| 3 | Criterion benchmarks | todo | — |
-| 4 | Container + k8s | todo | — |
-| 5 | Observability | todo | — |
-| 6 | Security report + CI | planned | [link](.rpiv/artifacts/plans/2026-06-12_16-30-00_security-report.md) |
-| 7 | cargo-fuzz | todo | — |
-| 8 | ADRs | todo | — |
-| 9 | Rollback runbook | todo | — |
+| 1 | Strangler-fig proxy | implemented | [docs](docs/STRANGLER_FIG.md) |
+| 2 | Proxy observability | implemented | `/metrics`, tracing, request IDs |
+| 3 | Rollback runbook | implemented | [docs](docs/ROLLBACK.md) |
+| 4 | Config shim | todo | — |
+| 5 | Criterion benchmarks | todo | — |
+| 6 | Container + k8s | todo | — |
+| 7 | Security report + CI | planned | [link](.rpiv/artifacts/plans/2026-06-12_16-30-00_security-report.md) |
+| 8 | cargo-fuzz | todo | — |
+| 9 | ADRs | accepted | [docs](docs/ADR-0002-async-runtime-split.md) |
 | 10 | Load tests | todo | — |
 | 11 | MkDocs site | todo | — |
 | 12 | cargo-mutants | todo | — |
@@ -272,4 +277,4 @@ concrete story the interviewer will remember after the conversation.
 | 14 | CHANGELOG | todo | — |
 | 15 | Man pages | todo | — |
 
-Last updated: 2026-06-12.
+Last updated: 2026-06-16.
