@@ -30,7 +30,8 @@ It does not yet provide:
 - filesystem or syscall sandboxing
 - runtime concurrency enforcement for parsed `cgilimit`
 
-These are recorded as operational deviations rather than hidden behind the
+These are recorded as operational deviations in
+[Known Deviations](KNOWN_DEVIATIONS.md) rather than hidden behind the
 request-parity result. A hardened deployment should use a supervisor or sandbox
 until native controls are implemented and tested.
 

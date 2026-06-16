@@ -32,8 +32,8 @@ documented normalizers.
 
 ## Interview Path
 
-1. Start with the structural-vs-behavioral failure story in `JOURNEY.md`.
-2. Show the C reference, Rust crates, and differential harness.
-3. Run `make demo`.
-4. Open the strangler-fig proxy docs, refactor playbook, and known-deviation register.
-5. Connect the method to side-by-side migration, shadow verification, controlled cutover, and rollback.
+The canonical five-minute walkthrough is [INTERVIEW_DEMO.md](INTERVIEW_DEMO.md):
+the risk, the shape and architecture decisions, the structural-vs-behavioral
+failure story, the proof (`make verify`), and the strangler-fig migration
+machinery alongside the known-deviation register. This audit records the
+verified strengths and remaining risks; it does not maintain a second script.
