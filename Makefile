@@ -2,7 +2,7 @@ PYTHON ?= python3
 CARGO_MANIFEST := rust/Cargo.toml
 PYTEST := $(PYTHON) -m pytest
 
-.PHONY: help check build legacy comparator unit harness differential knowledge security integration verify demo
+.PHONY: help check build legacy comparator unit harness differential knowledge security integration verify demo proxy
 
 help:
 	@printf '%s\n' \
@@ -29,10 +29,13 @@ unit:
 	cargo test --manifest-path $(CARGO_MANIFEST) --workspace
 
 harness: build legacy
-	$(PYTEST) harness/tests/ --ignore=harness/tests/test_differential.py -q --timeout=30 --timeout-method=thread
+	$(PYTEST) harness/tests/ --ignore=harness/tests/test_differential.py --ignore=harness/tests/test_proxy.py -q --timeout=30 --timeout-method=thread
 
 differential: build legacy
 	$(PYTEST) harness/tests/test_differential.py -q --timeout=120 --timeout-method=thread
+
+proxy: build legacy
+	$(PYTEST) harness/tests/test_proxy.py -q --timeout=60 --timeout-method=thread
 
 knowledge:
 	$(PYTHON) pipeline/validate_knowledge.py
@@ -43,7 +46,7 @@ security:
 	cargo audit --file rust/Cargo.lock
 	cargo deny --manifest-path rust/Cargo.toml check
 
-integration: harness differential
+integration: harness differential proxy
 
 verify: check security integration
 
