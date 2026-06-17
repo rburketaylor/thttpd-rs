@@ -118,6 +118,18 @@ make legacy
 - Bind-before-setuid ordering, legacy config compatibility, and comparator
   correctness belong in the migration, not in a later polish phase.
 
+## Interview Path
+
+Start with the presenter-first walkthrough in
+[docs/INTERVIEW_DEMO.md](docs/INTERVIEW_DEMO.md). It provides a 5-7 minute talk
+track, live demo command, transitions, recovery lines, and links to deeper
+evidence so the discussion does not turn into reading the repository aloud.
+
+Use [`JOURNEY.md`](JOURNEY.md) for the migration case study,
+[`docs/KNOWN_DEVIATIONS.md`](docs/KNOWN_DEVIATIONS.md) for honest gap tracking,
+[`docs/STRANGLER_FIG.md`](docs/STRANGLER_FIG.md) for cutover mechanics, and
+[`docs/AI_ASSISTANCE.md`](docs/AI_ASSISTANCE.md) for how AI output was verified.
+
 The reusable method is documented in
 [docs/REFACTOR_PLAYBOOK.md](docs/REFACTOR_PLAYBOOK.md). The five-minute project
 walkthrough is in [docs/INTERVIEW_DEMO.md](docs/INTERVIEW_DEMO.md).
