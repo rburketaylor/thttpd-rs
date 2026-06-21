@@ -1,22 +1,34 @@
+[graph]
+all-features = false
+
 [advisories]
-yanked = "deny"
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "deny"        # strict (was already "deny" before Phase 5)
 
 [licenses]
 confidence-threshold = 0.8
 allow = [
-    "Apache-2.0",
-    "BSD-2-Clause",
+    "BSD-2-Clause",      # thttpd-rs itself, thttpd legacy
     "BSD-3-Clause",
-    "ISC",
     "MIT",
-    "Unicode-3.0",
+    "Apache-2.0",
+    "ISC",
     "Zlib",
+    "Unicode-DFS-2016",  # older unicode-using crates
+    "Unicode-3.0",       # already in the pre-Phase-5 allow list
 ]
 
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+highlight = "all"
+deny = []
+skip = []
+skip-tree = []
 
 [sources]
 unknown-registry = "deny"
-unknown-git = "deny"
+unknown-git = "deny"   # strict (was already "deny" before Phase 5)
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

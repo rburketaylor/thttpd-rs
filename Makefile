@@ -43,8 +43,10 @@ knowledge:
 security:
 	@command -v cargo-audit >/dev/null || { echo 'cargo-audit is required: cargo install cargo-audit --locked'; exit 1; }
 	@command -v cargo-deny >/dev/null || { echo 'cargo-deny is required: cargo install cargo-deny --locked'; exit 1; }
+	@command -v cargo-geiger >/dev/null || { echo 'cargo-geiger is required: cargo install cargo-geiger --locked'; exit 1; }
 	cargo audit --file rust/Cargo.lock
 	cargo deny --manifest-path rust/Cargo.toml check
+	bash pipeline/audit_unsafe.sh
 
 integration: harness differential proxy
 

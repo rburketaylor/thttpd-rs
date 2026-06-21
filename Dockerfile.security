@@ -1,0 +1,25 @@
+# Minimal release image for thttpd-rs.
+#
+# This Dockerfile builds a small distroless-style image from the release
+# binary. The companion `pipeline/scan_container.sh` runs `trivy` against the
+# published image as part of the security sign-off (Phase 7 step 3). The full
+# container/k8s hardening (non-root user, read-only rootfs, distroless base
+# selection) is owned by the separate "Container + k8s deployment artifacts"
+# plan; this file is the minimal stub the scan step needs.
+FROM rust:1.85-slim AS build
+WORKDIR /src
+COPY rust/ ./rust/
+COPY deny.toml rust-toolchain.toml ./
+RUN cargo install cargo-auditable --locked --root /usr/local && \
+    RUSTFLAGS="-C link-arg=-Wl,-z,now" \
+      cargo auditable build --release --manifest-path rust/Cargo.toml
+
+FROM debian:stable-slim
+RUN apt-get update && apt-get install -y --no-install-recommends libssl3 ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+COPY --from=build /src/rust/target/release/thttpd /usr/local/bin/thttpd
+# Run as a non-root user (UID 65532, matching distroless:nosshell convention).
+RUN useradd --uid 65532 --no-create-home --shell /usr/sbin/nologin thttpd
+USER 65532
+EXPOSE 80
+ENTRYPOINT ["/usr/local/bin/thttpd"]
