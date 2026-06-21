@@ -118,6 +118,22 @@ make legacy
 - Bind-before-setuid ordering, legacy config compatibility, and comparator
   correctness belong in the migration, not in a later polish phase.
 
+## Security
+
+The Rust port is structurally immune to all 10 historical CVE classes filed
+against the C thttpd family (acme thttpd, Debian `src:thttpd`, Gentoo
+`sthttpd`). The evidence and methodology live in:
+
+- [Security Migration Report](docs/security/MIGRATION_REPORT.md) — historical CVE coverage, Rust mitigations, and the CI matrix
+- [Security Notes](docs/SECURITY_NOTES.md) — the three audited `unsafe` OS-boundary crates
+- [Vulnerability reporting & policy](SECURITY.md) — supported versions and response SLA
+
+CI jobs (in `.github/workflows/`): `security` (cargo audit + deny + geiger,
+every PR), `miri` (nightly), `sanitizers` (every PR, ASan), `fuzz` (nightly),
+`release` (SBOM on tag). Run them locally with `make security`; see
+[docs/security/RUNNING_LOCALLY.md](docs/security/RUNNING_LOCALLY.md) for Miri,
+ASan, and cargo-fuzz.
+
 ## Interview Path
 
 Start with the presenter-first walkthrough in
