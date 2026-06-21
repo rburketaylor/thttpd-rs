@@ -1,0 +1,42 @@
+# thttpd-fuzz — cargo-fuzz (libFuzzer) harness for the HTTP parser crates.
+#
+# STANDALONE package: deliberately NOT a member of rust/Cargo.toml's `members`
+# list (which is explicit, not a glob). libfuzzer-sys requires the nightly
+# toolchain, while the workspace is pinned to stable 1.85, so keeping this crate
+# out of `members` means `cargo build --workspace` on stable still works. No
+# `exclude` key is needed — omission from `members` is sufficient. Do NOT add
+# `{ workspace = true }` keys here: workspace inheritance only resolves for
+# actual members, and this crate is not one.
+[package]
+name = "thttpd-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Empty workspace table: makes this crate its OWN workspace root so cargo does
+# not auto-discover it into the parent rust/Cargo.toml workspace. Without this,
+# cargo walks up, finds rust/Cargo.toml, and treats `fuzz` as an implicit member
+# — which breaks the standalone intent (libfuzzer-sys needs nightly; the parent
+# workspace is pinned to stable 1.85). This is cargo's recommended idiom for a
+# sub-package that must stay out of the parent workspace.
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+# path dep into the workspace crate; do NOT use { workspace = true } (standalone).
+thttpd-http = { path = "../crates/thttpd-http" }
+libfuzzer-sys = "0.4"
+
+[[bin]]
+name = "parse_request"
+path = "fuzz_targets/parse_request.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "parse_url"
+path = "fuzz_targets/parse_url.rs"
+test = false
+doc = false
