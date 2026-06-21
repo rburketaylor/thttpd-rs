@@ -9,10 +9,11 @@ rust-version.workspace = true
 thttpd-match = { workspace = true }
 thttpd-tdate = { workspace = true }
 thttpd-mmc = { workspace = true }
+# Basic-Auth (crypt(3) FFI) is isolated in thttpd-auth so this crate stays
+# unsafe-free (enforced by pipeline/audit_unsafe.sh). Re-exported as `auth`.
+thttpd-auth = { workspace = true }
 memmap2 = { workspace = true }
 thiserror = { workspace = true }
-libc = { workspace = true }
-base64 = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

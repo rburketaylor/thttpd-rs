@@ -1198,6 +1198,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "thttpd-auth"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "libc",
+ "tempfile",
+]
+
+[[package]]
 name = "thttpd-core"
 version = "0.1.0"
 dependencies = [
@@ -1229,11 +1238,10 @@ dependencies = [
 name = "thttpd-http"
 version = "0.1.0"
 dependencies = [
- "base64",
- "libc",
  "memmap2",
  "tempfile",
  "thiserror",
+ "thttpd-auth",
  "thttpd-match",
  "thttpd-mmc",
  "thttpd-tdate",

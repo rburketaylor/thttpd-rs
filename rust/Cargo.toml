@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/thttpd-core",
     "crates/thttpd-http",
+    "crates/thttpd-auth",
     "crates/thttpd-fdwatch",
     "crates/thttpd-timers",
     "crates/thttpd-mmc",
@@ -21,6 +22,7 @@ rust-version = "1.85"
 [workspace.dependencies]
 thttpd-core = { path = "crates/thttpd-core", version = "0.1.0" }
 thttpd-http = { path = "crates/thttpd-http", version = "0.1.0" }
+thttpd-auth = { path = "crates/thttpd-auth", version = "0.1.0" }
 thttpd-fdwatch = { path = "crates/thttpd-fdwatch", version = "0.1.0" }
 thttpd-timers = { path = "crates/thttpd-timers", version = "0.1.0" }
 thttpd-mmc = { path = "crates/thttpd-mmc", version = "0.1.0" }

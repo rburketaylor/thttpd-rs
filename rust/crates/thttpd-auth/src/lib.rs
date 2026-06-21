@@ -1,4 +1,11 @@
-//! Basic Auth implementation matching C's `auth_check2` (libhttpd.c:995-1147).
+//! Basic-Auth implementation for thttpd-rs, matching C's `auth_check2`
+//! (`legacy/src/libhttpd.c:995-1147`).
+//!
+//! This is the `crypt(3)` Basic-Auth boundary — one of the three audited
+//! OS/FFI boundaries documented in `docs/SECURITY_NOTES.md`. It lives in its
+//! own crate so that `cargo-geiger` can honestly report `thttpd-http` (the
+//! request-parsing crate) as `unsafe`-free. The `unsafe` here is confined to
+//! the `crypt(3)` FFI and its `CStr` conversion.
 //!
 //! When a `.htpasswd` file exists in a directory containing the requested file,
 //! the server requires `Authorization: Basic <base64(user:pass)>` header. The

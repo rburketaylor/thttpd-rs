@@ -1,0 +1,14 @@
+[package]
+name = "thttpd-auth"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Basic-Auth (.htpasswd + crypt(3)) for thttpd-rs — the audited unsafe boundary"
+
+[dependencies]
+libc = { workspace = true }
+base64 = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
