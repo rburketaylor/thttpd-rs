@@ -1,0 +1,84 @@
+name: release
+# On tag: verify the tag signature, build with cargo-auditable (embedded
+# dependency SBOM), generate a CycloneDX SBOM, attach SLSA build-provenance
+# attestation, and publish binary + SHA256SUMS + SBOM to the GitHub release.
+#
+# Release operators create the signed tag locally
+# (`git tag -s -a vX.Y.Z && git push origin vX.Y.Z`); this workflow only
+# VERIFIES the signature — it never creates or pushes the tag that triggers it.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write       # publish the GitHub release
+  id-token: write       # OIDC for the provenance attestation
+  attestations: write   # create the attestation
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Import trusted release signing key
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          # ASCII-armored PUBLIC key of the maintainer(s) allowed to sign
+          # release tags. Configure under repo Settings → Secrets and
+          # variables → Actions as `RELEASE_SIGNING_KEY`. Only the public
+          # key is needed here — the private key never enters CI. Without
+          # this import, `git tag -v` fails with "No public key" because the
+          # runner's GPG keyring starts empty.
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: |
+          if [ -z "$RELEASE_SIGNING_KEY" ]; then
+            echo "::error::RELEASE_SIGNING_KEY secret is not set; cannot verify signed release tags."
+            exit 1
+          fi
+          printf '%s' "$RELEASE_SIGNING_KEY" | gpg --import
+
+      - name: Verify release tag signature
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          git fetch --tags --force
+          # Fails if the tag is unsigned or signed by a key other than the
+          # imported RELEASE_SIGNING_KEY.
+          git tag -v "${{ github.ref_name }}"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.85'
+
+      - name: Build release binary
+        run: |
+          cargo install cargo-auditable --locked
+          # -Wl,-z,now enables full RELRO (GOT read-only after relocation).
+          RUSTFLAGS="-C link-arg=-Wl,-z,now" \
+            cargo auditable build --release --manifest-path rust/Cargo.toml
+          mkdir -p dist
+          cp rust/target/release/thttpd dist/thttpd
+          sha256sum dist/thttpd > dist/SHA256SUMS
+
+      - name: Generate SBOM
+        run: |
+          cargo install cargo-cyclonedx --locked
+          # cargo-cyclonedx writes bom.json adjacent to rust/Cargo.toml.
+          cargo cyclonedx --manifest-path rust/Cargo.toml -f json
+          cp rust/bom.json /tmp/sbom.cdx.json
+
+      - name: Generate provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/thttpd
+            dist/SHA256SUMS
+
+      - name: Attach SBOM and binary to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            /tmp/sbom.cdx.json
+            dist/thttpd
+            dist/SHA256SUMS

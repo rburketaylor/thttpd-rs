@@ -1,0 +1,33 @@
+name: miri
+on:
+  schedule:
+    - cron: '0 4 * * *'  # 4am UTC nightly
+  workflow_dispatch:
+
+jobs:
+  miri:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install nightly
+        uses: dtolnay/rust-toolchain@nightly
+      - name: Install Miri
+        run: rustup +nightly component add miri rust-src
+      - name: Miri setup
+        working-directory: rust
+        run: cargo +nightly miri setup
+      # -Zmiri-permissive-provenance is needed because the parser exercises raw
+      # byte slicing; -Zmiri-disable-isolation lets env/time-dependent tests run.
+      # NOTE: -Zmiri-permissive-provenance is deprecated on newer nightlies in
+      # favor of -Zmiri-provenance-gc — if the pinned nightly rejects the old
+      # flag, swap to the new name (or drop it if parser tests pass without it).
+      - name: Miri test (thttpd-http)
+        working-directory: rust
+        env:
+          MIRIFLAGS: "-Zmiri-disable-isolation -Zmiri-permissive-provenance"
+        run: cargo +nightly miri test -p thttpd-http --lib
+      - name: Miri test (thttpd-tdate)
+        working-directory: rust
+        env:
+          MIRIFLAGS: "-Zmiri-disable-isolation -Zmiri-permissive-provenance"
+        run: cargo +nightly miri test -p thttpd-tdate --lib

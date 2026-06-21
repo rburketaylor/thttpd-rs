@@ -1,0 +1,30 @@
+name: security
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.85'
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit,cargo-deny,cargo-geiger
+      # Canonical invocation lives in `make security`
+      # (cargo audit + cargo deny + pipeline/audit_unsafe.sh). CI and local run
+      # the exact same command — no flag drift.
+      - name: Security checks (audit + deny + geiger)
+        run: make security
+      - name: Upload geiger report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-report
+          path: geiger.json
+          if-no-files-found: ignore

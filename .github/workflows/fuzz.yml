@@ -1,0 +1,29 @@
+name: fuzz
+on:
+  schedule:
+    - cron: '0 6 * * *'   # 6am UTC nightly
+  workflow_dispatch:
+
+jobs:
+  fuzz-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      # -max_total_time=60 bounds CI cost while still fuzzing each target for a
+      # full minute. NOTE: -runs=0 must NOT be added here — it puts libFuzzer in
+      # regression mode (process the corpus once and exit), which dominates the
+      # time budget; with an empty corpus it exits near-instantly and the job
+      # passes without actually fuzzing. Long unbounded fuzzing is a local /
+      # manual activity, documented in docs/security/RUNNING_LOCALLY.md.
+      - name: Smoke fuzz parse_request (60s)
+        working-directory: rust
+        run: cargo +nightly fuzz run parse_request -- -max_total_time=60
+      - name: Smoke fuzz parse_url (60s)
+        working-directory: rust
+        run: cargo +nightly fuzz run parse_url    -- -max_total_time=60
+      - name: Fail on any crash artifact
+        run: '! find rust/fuzz -name "crash-*" | grep -q .'

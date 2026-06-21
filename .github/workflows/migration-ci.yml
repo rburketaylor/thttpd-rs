@@ -24,19 +24,6 @@ jobs:
       - name: Format, lint, unit, comparator, and knowledge checks
         run: make check
 
-  security:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: '1.85'
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-audit,cargo-deny
-      - name: Dependency policy and advisory checks
-        run: make security
-
   integration:
     runs-on: ubuntu-latest
     steps:

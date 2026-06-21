@@ -1,0 +1,22 @@
+name: sanitizers
+on:
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 5 * * *'  # 5am UTC daily
+
+jobs:
+  asan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      # ASan is applied via inline RUSTFLAGS — all cargo needs. This job gates
+      # AddressSanitizer only; do not claim UBSan here unless a separate,
+      # verified UBSan command is added.
+      - name: ASan test (thttpd-http)
+        working-directory: rust
+        run: |
+          RUSTFLAGS="-Z sanitizer=address" \
+            cargo +nightly test -p thttpd-http --lib \
+              --target x86_64-unknown-linux-gnu
