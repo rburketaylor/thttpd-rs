@@ -19,11 +19,18 @@ jobs:
       # time budget; with an empty corpus it exits near-instantly and the job
       # passes without actually fuzzing. Long unbounded fuzzing is a local /
       # manual activity, documented in docs/security/RUNNING_LOCALLY.md.
+      # --target=x86_64-unknown-linux-gnu is REQUIRED: taiki-e/install-action no
+      # longer ships cargo-fuzz natively, so the cargo-binstall fallback grabs the
+      # musl-compiled binary. cargo-fuzz embeds its BUILD triple
+      # (current_platform::CURRENT_PLATFORM) as the default --target, so the musl
+      # binary forces --target x86_64-unknown-linux-musl, which both (a) needs an
+      # uninstalled musl std and (b) is incompatible with ASan's statically-linked
+      # libc. Pinning gnu (the installed host triple) keeps ASan working.
       - name: Smoke fuzz parse_request (60s)
         working-directory: rust
-        run: cargo +nightly fuzz run parse_request -- -max_total_time=60
+        run: cargo +nightly fuzz run parse_request --target x86_64-unknown-linux-gnu -- -max_total_time=60
       - name: Smoke fuzz parse_url (60s)
         working-directory: rust
-        run: cargo +nightly fuzz run parse_url    -- -max_total_time=60
+        run: cargo +nightly fuzz run parse_url    --target x86_64-unknown-linux-gnu -- -max_total_time=60
       - name: Fail on any crash artifact
         run: '! find rust/fuzz -name "crash-*" | grep -q .'
