@@ -23,5 +23,6 @@ signal-hook = { workspace = true }
 nix = { workspace = true }
 libc = { workspace = true }
 slab = { workspace = true }
+socket2 = { workspace = true }
 hostname = "0.4"
 tempfile = "3"

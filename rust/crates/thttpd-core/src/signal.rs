@@ -51,22 +51,26 @@ pub fn got_usr1() -> bool {
 
 /// Set up signal handlers.
 pub fn install_signal_handlers() -> std::io::Result<()> {
-    use signal_hook::consts::{SIGHUP, SIGINT, SIGPIPE, SIGTERM, SIGUSR1};
-    use signal_hook::flag;
+    #[cfg(unix)]
+    {
+        use signal_hook::consts::{SIGHUP, SIGINT, SIGPIPE, SIGTERM, SIGUSR1};
+        use signal_hook::flag;
 
-    flag::register(SIGTERM, FLAGS.terminate.clone())?;
-    flag::register(SIGINT, FLAGS.terminate.clone())?;
-    flag::register(SIGHUP, FLAGS.hup.clone())?;
-    flag::register(SIGUSR1, FLAGS.usr1.clone())?;
-    // Swallow SIGPIPE: register it with an AtomicBool whose value is never
-    // read. This replaces the previous `unsafe` low-level registrar with the
-    // safe flag path, so a `write()` to a closed pipe returns `Err(EPIPE)`
-    // instead of killing the process — no `unsafe` required.
-    flag::register(SIGPIPE, FLAGS.sigpipe_sink.clone())?;
+        flag::register(SIGTERM, FLAGS.terminate.clone())?;
+        flag::register(SIGINT, FLAGS.terminate.clone())?;
+        flag::register(SIGHUP, FLAGS.hup.clone())?;
+        flag::register(SIGUSR1, FLAGS.usr1.clone())?;
+        // Swallow SIGPIPE: register it with an AtomicBool whose value is never
+        // read. This replaces the previous `unsafe` low-level registrar with the
+        // safe flag path, so a `write()` to a closed pipe returns `Err(EPIPE)`
+        // instead of killing the process — no `unsafe` required.
+        flag::register(SIGPIPE, FLAGS.sigpipe_sink.clone())?;
+    }
 
     Ok(())
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 mod tests {
     use super::*;

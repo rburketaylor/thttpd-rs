@@ -61,6 +61,23 @@ pub struct ThrottleTable {
     entries: Vec<ThrottleEntry>,
 }
 
+/// Result of admitting a request against the throttle table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ThrottleDecision {
+    /// No throttle rule matched — send without rate limiting.
+    Unlimited,
+    /// Admit the request; carry the matched throttle indexes and the
+    /// connection's effective max/min limits.
+    Allow {
+        tnums: Vec<usize>,
+        max_limit: i64,
+        min_limit: i64,
+    },
+    /// Reject with HTTP 503 — the throttle is over `max_limit * 2` or below
+    /// `min_limit` and must not start a new transfer.
+    Reject,
+}
+
 impl ThrottleTable {
     pub fn new() -> Self {
         Self {
@@ -124,6 +141,117 @@ impl ThrottleTable {
         &self.entries
     }
 
+    /// Mutable access to entries (for fair-share recompute tests).
+    pub fn entries_mut(&mut self) -> &mut [ThrottleEntry] {
+        &mut self.entries
+    }
+
+    /// True when there are no throttle rules loaded.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Admission decision for a new request. Mirrors C's `check_throttles`
+    /// (thttpd.c:1882-1921): walk every pattern, reject the start when the
+    /// rolling rate is above `max_limit * 2` or below `min_limit`, otherwise
+    /// record the matched indexes, bump `num_sending`, and compute the
+    /// fair-share max/min for this connection.
+    pub fn check_request(&mut self, filename: &str) -> ThrottleDecision {
+        if self.entries.is_empty() {
+            return ThrottleDecision::Unlimited;
+        }
+        let mut tnums: Vec<usize> = Vec::new();
+        let mut max_limit = THROTTLE_NOLIMIT;
+        let mut min_limit = THROTTLE_NOLIMIT;
+        for (tnum, entry) in self.entries.iter_mut().enumerate() {
+            if tnums.len() >= MAX_THROTTLE_NUMS {
+                break;
+            }
+            if thttpd_match::match_pattern(&entry.pattern, filename) {
+                // Way over the limit, or below the minimum: don't even start.
+                if entry.rate > entry.max_limit * 2 || entry.rate < entry.min_limit {
+                    // Roll back any increments done so far on this request.
+                    for &t in &tnums {
+                        self.entries[t].num_sending -= 1;
+                    }
+                    return ThrottleDecision::Reject;
+                }
+                if entry.num_sending < 0 {
+                    entry.num_sending = 0;
+                }
+                entry.num_sending += 1;
+                tnums.push(tnum);
+                let l = entry.max_limit / entry.num_sending;
+                max_limit = if max_limit == THROTTLE_NOLIMIT {
+                    l
+                } else {
+                    max_limit.min(l)
+                };
+                min_limit = if min_limit == THROTTLE_NOLIMIT {
+                    entry.min_limit
+                } else {
+                    min_limit.max(entry.min_limit)
+                };
+            }
+        }
+        if tnums.is_empty() {
+            ThrottleDecision::Unlimited
+        } else {
+            ThrottleDecision::Allow {
+                tnums,
+                max_limit,
+                min_limit,
+            }
+        }
+    }
+
+    /// Decrement `num_sending` for each matched throttle of a closing
+    /// connection (C's `clear_throttles`, thttpd.c:1922-1928).
+    pub fn clear(&mut self, tnums: &[usize]) {
+        for &tnum in tnums {
+            if let Some(entry) = self.entries.get_mut(tnum) {
+                entry.num_sending -= 1;
+            }
+        }
+    }
+
+    /// Account `n` body bytes against every matched throttle (C does
+    /// `throttles[tnum].bytes_since_avg += sz` in handle_send).
+    pub fn add_bytes(&mut self, tnums: &[usize], n: i64) {
+        for &tnum in tnums {
+            if let Some(entry) = self.entries.get_mut(tnum) {
+                entry.bytes_since_avg += n;
+            }
+        }
+    }
+
+    /// Recompute a connection's fair-share max from the current `num_sending`
+    /// of each matched throttle. Returns THROTTLE_NOLIMIT when nothing matched.
+    /// Mirrors `update_throttles`'s per-connection loop (thttpd.c:1989-2002).
+    pub fn fair_share_for(&self, tnums: &[usize]) -> i64 {
+        let mut max_limit = THROTTLE_NOLIMIT;
+        for &tnum in tnums {
+            if let Some(entry) = self.entries.get(tnum) {
+                let senders = entry.num_sending.max(1);
+                let l = entry.max_limit / senders;
+                max_limit = if max_limit == THROTTLE_NOLIMIT {
+                    l
+                } else {
+                    max_limit.min(l)
+                };
+            }
+        }
+        max_limit
+    }
+
+    /// Update rolling averages for every throttle. Called every THROTTLE_TIME
+    /// seconds by the event loop (C's `update_throttles`, thttpd.c:1968-1976).
+    pub fn update_averages(&mut self) {
+        for entry in &mut self.entries {
+            Self::update_rate(entry);
+        }
+    }
+
     /// Calculate rolling average: (2 * rate + bytes / THROTTLE_TIME) / 3
     /// Integer arithmetic — must match C's truncation exactly.
     pub fn update_rate(entry: &mut ThrottleEntry) {
@@ -142,7 +270,7 @@ impl ThrottleTable {
 
     /// Check if a file should be throttled. Returns the matching entry's
     /// (max_limit, min_limit) or (NOLIMIT, NOLIMIT) if no match.
-    /// Mirrors C's `check_throttles` at thttpd.c:1882-1921.
+    /// Mirrors C's `check_throttles` at thttpd.c:1882-1921 (read-only view).
     pub fn check_throttles(&self, filename: &str) -> (i64, i64) {
         if self.entries.is_empty() {
             return (THROTTLE_NOLIMIT, THROTTLE_NOLIMIT);
@@ -327,5 +455,97 @@ mod tests {
         let (max, min) = table.check_throttles("anything");
         assert_eq!(max, THROTTLE_NOLIMIT);
         assert_eq!(min, THROTTLE_NOLIMIT);
+    }
+
+    #[test]
+    fn check_request_admits_and_bumps_num_sending() {
+        let mut table = ThrottleTable {
+            entries: vec![ThrottleEntry::new("*.html".into(), 10000, 0)],
+        };
+        let dec = table.check_request("page.html");
+        let ThrottleDecision::Allow {
+            tnums, max_limit, ..
+        } = dec
+        else {
+            panic!("expected Allow, got {dec:?}");
+        };
+        assert_eq!(tnums, vec![0]);
+        assert_eq!(max_limit, 10000); // 10000 / 1 sender
+        assert_eq!(table.entries()[0].num_sending, 1);
+    }
+
+    #[test]
+    fn check_request_rejects_when_rate_far_exceeds_limit() {
+        let mut entry = ThrottleEntry::new("*.html".into(), 1000, 0);
+        entry.rate = 5000; // > max_limit * 2 = 2000
+        let mut table = ThrottleTable {
+            entries: vec![entry],
+        };
+        assert_eq!(table.check_request("page.html"), ThrottleDecision::Reject);
+        // num_sending must not have been bumped.
+        assert_eq!(table.entries()[0].num_sending, 0);
+    }
+
+    #[test]
+    fn check_request_rejects_when_below_min_limit() {
+        let mut entry = ThrottleEntry::new("*.html".into(), 1000000, 5000);
+        entry.rate = 100; // < min_limit = 5000
+        let mut table = ThrottleTable {
+            entries: vec![entry],
+        };
+        assert_eq!(table.check_request("page.html"), ThrottleDecision::Reject);
+    }
+
+    #[test]
+    fn clear_decrements_num_sending() {
+        let mut table = ThrottleTable {
+            entries: vec![ThrottleEntry::new("*.html".into(), 10000, 0)],
+        };
+        let ThrottleDecision::Allow { tnums, .. } = table.check_request("page.html") else {
+            unreachable!();
+        };
+        assert_eq!(table.entries()[0].num_sending, 1);
+        table.clear(&tnums);
+        assert_eq!(table.entries()[0].num_sending, 0);
+    }
+
+    #[test]
+    fn fair_share_splits_bandwidth_across_senders() {
+        let mut table = ThrottleTable {
+            entries: vec![ThrottleEntry::new("*.html".into(), 10000, 0)],
+        };
+        // Two admitted requests share the 10000 budget.
+        let a = table.check_request("a.html");
+        let b = table.check_request("b.html");
+        let tnums_a = match a {
+            ThrottleDecision::Allow { tnums, .. } => tnums,
+            _ => unreachable!(),
+        };
+        assert_eq!(table.fair_share_for(&tnums_a), 5000);
+        // After one clears, the survivor gets the full budget again.
+        let tnums_b = match b {
+            ThrottleDecision::Allow { tnums, .. } => tnums,
+            _ => unreachable!(),
+        };
+        table.clear(&tnums_b);
+        assert_eq!(table.fair_share_for(&tnums_a), 10000);
+    }
+
+    #[test]
+    fn update_averages_matches_c_formula() {
+        let mut table = ThrottleTable {
+            entries: vec![ThrottleEntry {
+                pattern: "*.html".into(),
+                max_limit: 10000,
+                min_limit: 0,
+                rate: 5000,
+                bytes_since_avg: 4000,
+                num_sending: 1,
+            }],
+        };
+        table.update_averages();
+        // (2 * 5000 + 4000 / 2) / 3 = (10000 + 2000) / 3 = 4000
+        assert_eq!(table.entries()[0].rate, 4000);
+        assert_eq!(table.entries()[0].bytes_since_avg, 0);
     }
 }

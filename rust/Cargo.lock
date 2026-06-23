@@ -1217,6 +1217,7 @@ dependencies = [
  "nix",
  "signal-hook",
  "slab",
+ "socket2",
  "tempfile",
  "thttpd-fdwatch",
  "thttpd-http",

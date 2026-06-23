@@ -78,6 +78,7 @@ pub struct HttpConn {
     // Response
     pub response: Vec<u8>,
     pub response_len: usize,
+    pub response_header_len: usize,
     pub status_code: u16,
     pub status_text: String,
     pub headers: Vec<(String, String)>,
@@ -137,6 +138,7 @@ impl HttpConn {
 
             response: Vec::new(),
             response_len: 0,
+            response_header_len: 0,
             status_code: 0,
             status_text: String::new(),
             headers: Vec::new(),
@@ -186,6 +188,7 @@ impl HttpConn {
         self.range_if = None;
         self.response.clear();
         self.response_len = 0;
+        self.response_header_len = 0;
         self.status_code = 0;
         self.status_text.clear();
         self.headers.clear();

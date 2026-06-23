@@ -3,11 +3,16 @@
 //! New connections get priority over existing connection I/O.
 
 use crate::connection::ConnSlot;
+use crate::logging::LogEntry;
 use crate::server::Server;
+use crate::throttle::{CGI_BYTECOUNT, THROTTLE_TIME, ThrottleDecision};
 use std::io::{self, Read, Write};
 use std::path::Path;
 use std::time::Duration;
-use thttpd_fdwatch::{Events, Interest, Token, conn_token, is_listen_token, slab_key_from_token};
+use std::time::Instant;
+use thttpd_fdwatch::{
+    Events, Interest, MAX_LISTENERS, conn_token, is_listen_token, listen_token, slab_key_from_token,
+};
 use thttpd_http::Method;
 use thttpd_http::conn::ConnState;
 use thttpd_http::parse::{got_request, parse_method};
@@ -26,11 +31,49 @@ const READ_BUF_SIZE: usize = 60000;
 /// Maximum URL length before returning 500 Internal Error (matches C behavior).
 const MAX_URL_LENGTH: usize = 10000;
 
+/// Normalize a request/script path for throttle matching: strip a single
+/// leading `/` so the path is compared against throttle patterns the same
+/// way the throttlefile loader stores them. `throttle::parse_line` strips
+/// leading slashes from patterns at load time, so a rule like `*.html`
+/// (whose single `*` does not cross `/`) would otherwise never match a
+/// request path that arrives as `/index.html`. Only the value handed to
+/// `ThrottleTable::check_request` is normalized; user-facing paths, access
+/// logs, and error pages keep their original leading-slash form.
+#[inline]
+fn throttle_match_path(path: &str) -> &str {
+    path.strip_prefix('/').unwrap_or(path)
+}
+
+/// Internal helper: throttle admission result carried between non-overlapping
+/// borrows of `server.throttles` and `server.conns[slab_key]`.
+enum ThrottleAction {
+    Allow {
+        tnums: Vec<usize>,
+        max_limit: i64,
+        min_limit: i64,
+    },
+    Reject,
+}
+
 /// Run the main event loop until termination.
 pub fn run(server: &mut Server) -> io::Result<()> {
-    // Register listeners with poll
+    // Register listeners with poll. Listener tokens occupy the reserved
+    // range [0, MAX_LISTENERS); refuse to register more listeners than that
+    // range holds instead of handing a listener the same token as a
+    // connection (which would corrupt event dispatch).
     for (i, listener) in server.listeners.iter_mut().enumerate() {
-        let token = Token(i);
+        let token = match listen_token(i) {
+            Some(t) => t,
+            None => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "too many listen sockets ({}): maximum is {MAX_LISTENERS}",
+                        server.listeners.len()
+                    ),
+                ));
+            }
+        };
         server
             .poll
             .registry()
@@ -38,6 +81,7 @@ pub fn run(server: &mut Server) -> io::Result<()> {
     }
 
     let mut events = Events::with_capacity(1024);
+    let mut last_throttle_update = Instant::now();
 
     loop {
         // Check termination signal
@@ -45,10 +89,29 @@ pub fn run(server: &mut Server) -> io::Result<()> {
             break;
         }
 
-        // Calculate poll timeout from timer wheel
+        // SIGUSR1 — graceful drain
+        if !server.draining && crate::signal::got_usr1() {
+            server.draining = true;
+            // Deregister listeners so poll stops reporting pending connections.
+            // Without this, a level-triggered readable listener with a pending
+            // connection causes the event loop to busy-wait at 100% CPU.
+            for listener in &mut server.listeners {
+                let _ = server.poll.registry().deregister(listener);
+            }
+            if server.conns.is_empty() {
+                break;
+            }
+        }
+
+        // Calculate poll timeout from the timer wheel, paused throttles, and
+        // the periodic throttle-average update deadline.
         let timeout = server
             .timers
             .next_deadline()
+            .into_iter()
+            .chain(next_pause_deadline(server))
+            .chain(next_throttle_deadline(server, last_throttle_update))
+            .min()
             .unwrap_or(Duration::from_secs(60));
 
         // Poll for events
@@ -77,6 +140,8 @@ pub fn run(server: &mut Server) -> io::Result<()> {
             }
         }
 
+        resume_ready_paused_connections(server)?;
+
         // Run expired timers
         let mut ctx = thttpd_timers::TimerCtx;
         server.timers.run(&mut ctx);
@@ -84,17 +149,57 @@ pub fn run(server: &mut Server) -> io::Result<()> {
         // Periodic mmc cleanup
         server.mmc.cleanup();
 
+        // Periodic throttle update (every THROTTLE_TIME seconds)
+        {
+            let now = Instant::now();
+            if now.duration_since(last_throttle_update) >= Duration::from_secs(THROTTLE_TIME as u64)
+            {
+                if let Some(ref mut throttles) = server.throttles {
+                    throttles.update_averages();
+                }
+                last_throttle_update = now;
+
+                // Wake paused connections and recompute fair-share
+                for (slab_key, slot) in server.conns.iter_mut() {
+                    if slot.state == ConnState::Pausing && slot.throttle.is_throttled() {
+                        if let Some(pause_until) = slot.throttle.pause_until {
+                            if Instant::now() >= pause_until {
+                                if let Some(ref throttles) = server.throttles {
+                                    let new_max = throttles.fair_share_for(&slot.throttle.tnums);
+                                    slot.throttle.max_limit = new_max;
+                                }
+                                slot.state = ConnState::Sending;
+                                slot.throttle.pause_until = None;
+                                let token = conn_token(slab_key);
+                                if let Some(ref mut stream) = slot.stream {
+                                    // Re-register (not reregister): the stream
+                                    // was deregistered during the pause, so
+                                    // reregister would fail and the response
+                                    // could hang on the next window.
+                                    let _ = server.poll.registry().register(
+                                        stream,
+                                        token,
+                                        Interest::WRITABLE,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Process signal flags
         if crate::signal::got_hup() {
-            // SIGHUP received — re-open log file (libhttpd.c:237-254).
-            // C's re_open_logfile() closes the current log file handle and
-            // reopens it (allowing log rotation). The Rust port currently
-            // doesn't have a persistent log file — this is a no-op. When
-            // full logging support is added, the reopen logic would go here.
-            if let Some(ref logfile) = server.config.logfile {
-                eprintln!("thttpd: SIGHUP — would reopen logfile {:?}", logfile);
+            if let Err(e) = server.access_log.reopen() {
+                eprintln!("thttpd: failed to reopen access log: {e}");
             }
             crate::signal::clear_hup();
+        }
+
+        // Graceful drain: exit when no active connections
+        if server.draining && server.conns.is_empty() {
+            break;
         }
     }
 
@@ -103,6 +208,11 @@ pub fn run(server: &mut Server) -> io::Result<()> {
 
 /// Accept new connections from a listen socket.
 fn handle_accept(server: &mut Server, listener_idx: usize) -> io::Result<()> {
+    // If draining (SIGUSR1), stop accepting new connections
+    if server.draining {
+        return Ok(());
+    }
+
     // Accept as many connections as available (edge-triggered friendliness)
     loop {
         let (stream, peer_addr) = match server.listeners[listener_idx].accept() {
@@ -164,12 +274,58 @@ fn handle_connection_event(server: &mut Server, slab_key: usize) -> io::Result<(
         ConnState::Reading => handle_read(server, slab_key),
         ConnState::Sending => handle_send(server, slab_key),
         ConnState::Lingering => handle_linger(server, slab_key),
-        ConnState::Pausing => {
-            close_connection(server, slab_key);
-            Ok(())
-        }
+        ConnState::Pausing => handle_pause(server, slab_key),
         ConnState::Free => Ok(()),
     }
+}
+
+fn next_pause_deadline(server: &Server) -> Option<Duration> {
+    let now = Instant::now();
+    server
+        .conns
+        .iter()
+        .filter(|(_, slot)| slot.state == ConnState::Pausing)
+        .filter_map(|(_, slot)| slot.throttle.pause_until)
+        .map(|deadline| deadline.saturating_duration_since(now))
+        .min()
+}
+
+/// Remaining time until the next throttle-average update is due.
+///
+/// Returns `Some(THROTTLE_TIME − elapsed)` when `server.throttles` is
+/// configured, so the poll wakes in time to call `update_averages`. Clamped
+/// to zero when already overdue. Returns `None` when throttling is not
+/// configured, letting the 60 s fallback apply.
+fn next_throttle_deadline(server: &Server, last_update: Instant) -> Option<Duration> {
+    if server.throttles.is_some() {
+        let elapsed = last_update.elapsed();
+        let throttle_period = Duration::from_secs(THROTTLE_TIME as u64);
+        Some(throttle_period.saturating_sub(elapsed))
+    } else {
+        None
+    }
+}
+
+fn resume_ready_paused_connections(server: &mut Server) -> io::Result<()> {
+    let now = Instant::now();
+    let ready: Vec<usize> = server
+        .conns
+        .iter()
+        .filter(|(_, slot)| slot.state == ConnState::Pausing)
+        .filter(|(_, slot)| match slot.throttle.pause_until {
+            Some(deadline) => now >= deadline,
+            None => true,
+        })
+        .map(|(slab_key, _)| slab_key)
+        .collect();
+
+    for slab_key in ready {
+        if server.conns.contains(slab_key) && server.conns[slab_key].state == ConnState::Pausing {
+            handle_pause(server, slab_key)?;
+        }
+    }
+
+    Ok(())
 }
 
 /// Read data from a connection and process the request.
@@ -710,49 +866,30 @@ fn serve_static(server: &mut Server, slab_key: usize, file_path: &Path) {
 
     // --- Symlink escape prevention ---
     let file_path = {
-        let canonical_root = match std::fs::canonicalize(&server.config.dir) {
-            Ok(p) => p,
-            Err(_) => {
-                let user_agent = server.conns[slab_key].http.user_agent.clone();
-                let body = error_page(
-                    500,
-                    "Internal Error",
-                    "There was an unusual problem serving the requested URL '%.80s'.\n",
-                    &server.config.dir.to_string_lossy(),
-                    Some(&user_agent),
-                );
-                let http_ref = &server.conns[slab_key].http;
-                let response =
-                    build_full_response(http_ref, 500, "Internal Error", "text/html", -1, 0, &[]);
-                let full_response = if http_ref.mime_flag {
-                    let mut r = response;
-                    r.extend_from_slice(&body);
-                    r
-                } else {
-                    body
-                };
-                let slot = &mut server.conns[slab_key];
-                slot.http.response = full_response;
-                slot.http.response_len = slot.http.response.len();
-                transition_to_sending(server, slab_key);
-                return;
-            }
-        };
-        match std::fs::canonicalize(file_path) {
-            Ok(canonical) => {
-                if !canonical.starts_with(&canonical_root) {
-                    let url = server.conns[slab_key].http.encoded_url.clone();
+        if server.config.no_symlink_check {
+            file_path.to_path_buf()
+        } else {
+            let canonical_root = match std::fs::canonicalize(&server.config.dir) {
+                Ok(p) => p,
+                Err(_) => {
                     let user_agent = server.conns[slab_key].http.user_agent.clone();
                     let body = error_page(
-                        403,
-                        "Forbidden",
-                        "The requested URL '%.80s' resolves to a file outside the permitted web server directory tree.\n",
-                        &url,
+                        500,
+                        "Internal Error",
+                        "There was an unusual problem serving the requested URL '%.80s'.\n",
+                        &server.config.dir.to_string_lossy(),
                         Some(&user_agent),
                     );
                     let http_ref = &server.conns[slab_key].http;
-                    let response =
-                        build_full_response(http_ref, 403, "Forbidden", "text/html", -1, 0, &[]);
+                    let response = build_full_response(
+                        http_ref,
+                        500,
+                        "Internal Error",
+                        "text/html",
+                        -1,
+                        0,
+                        &[],
+                    );
                     let full_response = if http_ref.mime_flag {
                         let mut r = response;
                         r.extend_from_slice(&body);
@@ -766,9 +903,46 @@ fn serve_static(server: &mut Server, slab_key: usize, file_path: &Path) {
                     transition_to_sending(server, slab_key);
                     return;
                 }
-                canonical
+            };
+            match std::fs::canonicalize(file_path) {
+                Ok(canonical) => {
+                    if !canonical.starts_with(&canonical_root) {
+                        let url = server.conns[slab_key].http.encoded_url.clone();
+                        let user_agent = server.conns[slab_key].http.user_agent.clone();
+                        let body = error_page(
+                            403,
+                            "Forbidden",
+                            "The requested URL '%.80s' resolves to a file outside the permitted web server directory tree.\n",
+                            &url,
+                            Some(&user_agent),
+                        );
+                        let http_ref = &server.conns[slab_key].http;
+                        let response = build_full_response(
+                            http_ref,
+                            403,
+                            "Forbidden",
+                            "text/html",
+                            -1,
+                            0,
+                            &[],
+                        );
+                        let full_response = if http_ref.mime_flag {
+                            let mut r = response;
+                            r.extend_from_slice(&body);
+                            r
+                        } else {
+                            body
+                        };
+                        let slot = &mut server.conns[slab_key];
+                        slot.http.response = full_response;
+                        slot.http.response_len = slot.http.response.len();
+                        transition_to_sending(server, slab_key);
+                        return;
+                    }
+                    canonical
+                }
+                Err(_) => file_path.to_path_buf(),
             }
-            Err(_) => file_path.to_path_buf(),
         }
     };
 
@@ -1071,6 +1245,73 @@ fn serve_static(server: &mut Server, slab_key: usize, file_path: &Path) {
         }
     }
 
+    // --- Throttle admission pre-check ---
+    // Check throttle rules BEFORE early static responses and before mmap'ing /
+    // copying the file body so over-limit requests get the legacy 503 and do
+    // not pay the memory and I/O cost of reading a potentially large file.
+    let request_path = server.conns[slab_key].http.orig_filename.clone();
+    let match_path = throttle_match_path(&request_path);
+    let (throttle_state, throttle_rejected) = if let Some(ref mut throttles) = server.throttles {
+        match throttles.check_request(match_path) {
+            ThrottleDecision::Allow {
+                tnums,
+                max_limit,
+                min_limit,
+            } => (Some((tnums, max_limit, min_limit)), false),
+            ThrottleDecision::Reject => (None, true),
+            ThrottleDecision::Unlimited => (None, false),
+        }
+    } else {
+        (None, false)
+    };
+
+    if throttle_rejected {
+        {
+            let slot = &mut server.conns[slab_key];
+            let user_agent = slot.http.user_agent.clone();
+            let body = error_page(
+                503,
+                "Service Unavailable",
+                "The requested URL '%.80s' is temporarily over its bandwidth limit.\n",
+                &request_path,
+                Some(&user_agent),
+            );
+            let http_ref = &slot.http;
+            let response = build_full_response(
+                http_ref,
+                503,
+                "Service Unavailable",
+                "text/html",
+                -1,
+                0,
+                &[],
+            );
+            let full_response = if http_ref.mime_flag {
+                let mut r = response;
+                r.extend_from_slice(&body);
+                r
+            } else {
+                body
+            };
+            slot.http.response = full_response;
+            slot.http.response_len = slot.http.response.len();
+            slot.http.status_code = 503;
+            slot.throttle.checked = true;
+        }
+        transition_to_sending(server, slab_key);
+        return;
+    }
+
+    {
+        let slot = &mut server.conns[slab_key];
+        if let Some((tnums, max_limit, min_limit)) = throttle_state {
+            slot.throttle.tnums = tnums;
+            slot.throttle.max_limit = max_limit;
+            slot.throttle.min_limit = min_limit;
+        }
+        slot.throttle.checked = true;
+    }
+
     let method = server.conns[slab_key].http.method;
 
     // --- HEAD: headers with Content-Length but no body ---
@@ -1184,6 +1425,11 @@ fn serve_static(server: &mut Server, slab_key: usize, file_path: &Path) {
                 &extra_headers,
             );
             let slot = &mut server.conns[slab_key];
+            let header_len = if slot.http.mime_flag {
+                response.len()
+            } else {
+                0
+            };
             let full_response = if slot.http.mime_flag {
                 let mut r = response;
                 r.extend_from_slice(&body);
@@ -1194,6 +1440,7 @@ fn serve_static(server: &mut Server, slab_key: usize, file_path: &Path) {
             slot.http.file_address = Some(mmap);
             slot.http.response = full_response;
             slot.http.response_len = slot.http.response.len();
+            slot.http.response_header_len = header_len;
             slot.http.bytes_sent = 0;
             slot.http.status_code = if is_range { 206 } else { 200 };
             transition_to_sending(server, slab_key);
@@ -1229,6 +1476,42 @@ fn serve_static(server: &mut Server, slab_key: usize, file_path: &Path) {
 fn dispatch_cgi(server: &mut Server, slab_key: usize, _script_path: &Path) {
     // Propagate the configured charset to the connection
     server.conns[slab_key].http.charset = server.config.charset.clone();
+
+    // --- CGI limit enforcement (matching C's cgi_limit check at thttpd.c:220) ---
+    if server.cgi_limit() > 0 && server.active_cgis >= server.cgi_limit() {
+        let url = server.conns[slab_key].http.encoded_url.clone();
+        let user_agent = server.conns[slab_key].http.user_agent.clone();
+        let body = error_page(
+            503,
+            "Service Unavailable",
+            "Too many concurrent CGI requests. Please try again later.\n",
+            &url,
+            Some(&user_agent),
+        );
+        let http_ref = &server.conns[slab_key].http;
+        let response = build_full_response(
+            http_ref,
+            503,
+            "Service Unavailable",
+            "text/html",
+            -1,
+            0,
+            &[],
+        );
+        let full_response = if http_ref.mime_flag {
+            let mut r = response;
+            r.extend_from_slice(&body);
+            r
+        } else {
+            body
+        };
+        let slot = &mut server.conns[slab_key];
+        slot.http.response = full_response;
+        slot.http.response_len = slot.http.response.len();
+        transition_to_sending(server, slab_key);
+        return;
+    }
+    server.active_cgis += 1;
 
     let (
         method,
@@ -1304,8 +1587,17 @@ fn dispatch_cgi(server: &mut Server, slab_key: usize, _script_path: &Path) {
 
     let resolved_path = server.config.dir.join(&resolved_script[1..]);
 
+    // Set CGI working directory to script's parent (matching C behavior)
+    let _cgi_working_dir = resolved_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| server.config.dir.clone());
+    // TODO: Execute CGI with working dir = script's parent directory.
+    // The current execute_cgi does not support setting the working directory.
+
     // --- CGI not-found check ---
     if !resolved_path.exists() || resolved_path.is_dir() {
+        server.active_cgis -= 1;
         let url = server.conns[slab_key].http.encoded_url.clone();
         let user_agent = server.conns[slab_key].http.user_agent.clone();
         let body = error_page(
@@ -1329,6 +1621,51 @@ fn dispatch_cgi(server: &mut Server, slab_key: usize, _script_path: &Path) {
         slot.http.response_len = slot.http.response.len();
         transition_to_sending(server, slab_key);
         return;
+    }
+
+    // --- CGI throttle check ---
+    if let Some(ref mut throttles) = server.throttles {
+        match throttles.check_request(throttle_match_path(&resolved_script)) {
+            ThrottleDecision::Reject => {
+                server.active_cgis -= 1;
+                let url = server.conns[slab_key].http.encoded_url.clone();
+                let user_agent = server.conns[slab_key].http.user_agent.clone();
+                let body = error_page(
+                    503,
+                    "Service Unavailable",
+                    "The requested URL '%.80s' is temporarily over its bandwidth limit.\n",
+                    &url,
+                    Some(&user_agent),
+                );
+                let http_ref = &server.conns[slab_key].http;
+                let response = build_full_response(
+                    http_ref,
+                    503,
+                    "Service Unavailable",
+                    "text/html",
+                    -1,
+                    0,
+                    &[],
+                );
+                let full_response = if http_ref.mime_flag {
+                    let mut r = response;
+                    r.extend_from_slice(&body);
+                    r
+                } else {
+                    body
+                };
+                let slot = &mut server.conns[slab_key];
+                slot.http.response = full_response;
+                slot.http.response_len = slot.http.response.len();
+                transition_to_sending(server, slab_key);
+                return;
+            }
+            ThrottleDecision::Allow { tnums, .. } => {
+                // Store tnums so we can account CGI_BYTECOUNT on completion
+                server.conns[slab_key].throttle.tnums = tnums;
+            }
+            ThrottleDecision::Unlimited => {}
+        }
     }
 
     // Build HTTP headers map
@@ -1455,6 +1792,12 @@ fn dispatch_cgi(server: &mut Server, slab_key: usize, _script_path: &Path) {
         })
     });
 
+    // Past all admission guards (limit, not-found, throttle-reject): this
+    // request is a genuine CGI dispatch. Flag it so transition_to_sending
+    // does not re-admit the response against the throttle table — CGI output
+    // is already charged a flat CGI_BYTECOUNT on completion below.
+    server.conns[slab_key].is_cgi = true;
+
     match thttpd_http::cgi::execute_cgi(&resolved_path, env, post_body.as_deref()) {
         Ok(mut cgi_result) => {
             let mut output = Vec::new();
@@ -1484,6 +1827,20 @@ fn dispatch_cgi(server: &mut Server, slab_key: usize, _script_path: &Path) {
                 resp
             };
 
+            // CGI completion cleanup
+            server.active_cgis -= 1;
+            if server.conns[slab_key].throttle.is_throttled() {
+                let tnums = server.conns[slab_key].throttle.tnums.clone();
+                if let Some(ref mut throttles) = server.throttles {
+                    throttles.add_bytes(&tnums, CGI_BYTECOUNT);
+                    throttles.clear(&tnums);
+                }
+                // CGI output was charged a flat CGI_BYTECOUNT above; clear
+                // the per-connection throttle so the response stream is sent
+                // without re-admission or rate limiting.
+                server.conns[slab_key].throttle.reset();
+            }
+
             let slot = &mut server.conns[slab_key];
             slot.http.response = response;
             slot.http.response_len = slot.http.response.len();
@@ -1491,6 +1848,17 @@ fn dispatch_cgi(server: &mut Server, slab_key: usize, _script_path: &Path) {
         }
         Err(e) => {
             eprintln!("thttpd: CGI error: {e}");
+
+            // CGI completion cleanup
+            server.active_cgis -= 1;
+            if server.conns[slab_key].throttle.is_throttled() {
+                let tnums = server.conns[slab_key].throttle.tnums.clone();
+                if let Some(ref mut throttles) = server.throttles {
+                    throttles.clear(&tnums);
+                }
+                server.conns[slab_key].throttle.reset();
+            }
+
             let url = server.conns[slab_key].http.encoded_url.clone();
             let user_agent = server.conns[slab_key].http.user_agent.clone();
             let body = error_page(
@@ -1579,16 +1947,59 @@ fn extract_cgi_status(output: &[u8]) -> (u16, String) {
 }
 
 /// Send response bytes to the connection.
+///
+/// Throttled connections never hand the kernel more body bytes than the
+/// current time window allows: the write slice is capped at
+/// `remaining_header_bytes + allowed_body_bytes` (headers are free; only
+/// body bytes count against `max_limit * elapsed`). When the allowance is
+/// spent and only body bytes remain, the connection pauses for the
+/// one-second throttle window instead of writing.
 fn handle_send(server: &mut Server, slab_key: usize) -> io::Result<()> {
     let response_len = server.conns[slab_key].http.response_len;
-    let bytes_sent = server.conns[slab_key].http.bytes_sent;
+    let bytes_sent_before = server.conns[slab_key].http.bytes_sent;
 
-    if bytes_sent >= response_len as i64 {
+    if bytes_sent_before >= response_len as i64 {
         transition_to_lingering(server, slab_key);
         return Ok(());
     }
 
-    // Write bytes from the response buffer
+    // Cap the bytes written this round when the connection is throttled.
+    // Unthrottled connections (or those with no max limit) write the whole
+    // remaining buffer.
+    let write_limit: usize = {
+        let slot = &server.conns[slab_key];
+        if slot.throttle.is_throttled() && slot.throttle.max_limit > 0 {
+            let header_len = slot.throttle.header_len as i64;
+            let remaining_header_bytes = (header_len - bytes_sent_before).max(0) as usize;
+            let elapsed = slot
+                .throttle
+                .started_at
+                .map_or(1, |t| t.elapsed().as_secs().max(1)) as i64;
+            let allowed_body_bytes =
+                (slot.throttle.max_limit * elapsed - slot.throttle.body_bytes).max(0) as usize;
+            remaining_header_bytes + allowed_body_bytes
+        } else {
+            (response_len as i64 - bytes_sent_before) as usize
+        }
+    };
+
+    // The body allowance is exhausted and only body bytes remain: pause for
+    // the throttle window instead of writing (or attempting a zero-byte write).
+    if write_limit == 0 {
+        let slot = &mut server.conns[slab_key];
+        slot.throttle.pause_until = Some(Instant::now() + Duration::from_secs(1));
+        slot.state = ConnState::Pausing;
+        // Deregister from poll during the pause: resume is timer-driven
+        // via next_pause_deadline(), so no socket events are useful.
+        // Without deregistration, a readable/writable socket would cause
+        // handle_pause to no-op repeatedly for the 1 s pause window.
+        if let Some(ref mut stream) = slot.stream {
+            let _ = server.poll.registry().deregister(stream);
+        }
+        return Ok(());
+    }
+
+    // Write bytes from the response buffer, capped at the throttle allowance.
     let n = {
         let slot = &mut server.conns[slab_key];
         let stream = match slot.stream.as_mut() {
@@ -1599,8 +2010,9 @@ fn handle_send(server: &mut Server, slab_key: usize) -> io::Result<()> {
             }
         };
 
-        let remaining = &slot.http.response[bytes_sent as usize..];
-        match stream.write(remaining) {
+        let remaining = &slot.http.response[bytes_sent_before as usize..];
+        let limit = write_limit.min(remaining.len());
+        match stream.write(&remaining[..limit]) {
             Ok(n) => n,
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                 return Ok(());
@@ -1613,14 +2025,36 @@ fn handle_send(server: &mut Server, slab_key: usize) -> io::Result<()> {
         }
     };
 
-    server.conns[slab_key].http.bytes_sent += n as i64;
+    let bytes_sent_after = bytes_sent_before + n as i64;
+    server.conns[slab_key].http.bytes_sent = bytes_sent_after;
     server.stats.bytes_sent += n as u64;
 
-    let bytes_sent = server.conns[slab_key].http.bytes_sent;
-    if bytes_sent >= server.conns[slab_key].http.response_len as i64 {
+    // Account body bytes against the throttle (header bytes are never charged).
+    {
+        let slot = &mut server.conns[slab_key];
+        if slot.throttle.is_throttled() {
+            let header_len = slot.throttle.header_len as i64;
+            let body_before = (bytes_sent_before - header_len).max(0);
+            let body_after = (bytes_sent_after - header_len).max(0);
+            let body_delta = body_after - body_before;
+            if body_delta > 0 {
+                if let Some(ref mut throttles) = server.throttles {
+                    throttles.add_bytes(&slot.throttle.tnums, body_delta);
+                }
+                slot.throttle.body_bytes += body_delta;
+                slot.throttle.active_at = Some(Instant::now());
+            }
+        }
+    }
+
+    let response_len = server.conns[slab_key].http.response_len;
+    let bytes_sent_after = server.conns[slab_key].http.bytes_sent;
+    if bytes_sent_after >= response_len as i64 {
         transition_to_lingering(server, slab_key);
     } else {
-        // More to send — reregister for writable
+        // More to send. The next writable event re-enters handle_send, which
+        // caps the write at the remaining allowance and pauses once it is
+        // exhausted.
         let token = conn_token(slab_key);
         let slot = &mut server.conns[slab_key];
         if let Some(ref mut stream) = slot.stream {
@@ -1632,6 +2066,46 @@ fn handle_send(server: &mut Server, slab_key: usize) -> io::Result<()> {
     }
 
     Ok(())
+}
+
+fn handle_pause(server: &mut Server, slab_key: usize) -> io::Result<()> {
+    let now = Instant::now();
+    let pause_until = server.conns[slab_key].throttle.pause_until;
+    if matches!(pause_until, Some(deadline) if now < deadline) {
+        return Ok(());
+    }
+
+    if let Some(ref throttles) = server.throttles {
+        let tnums = server.conns[slab_key].throttle.tnums.clone();
+        let new_max = throttles.fair_share_for(&tnums);
+        server.conns[slab_key].throttle.max_limit = new_max;
+    }
+
+    {
+        let slot = &mut server.conns[slab_key];
+        slot.state = ConnState::Sending;
+        slot.throttle.pause_until = None;
+    }
+
+    let token = conn_token(slab_key);
+    let slot = &mut server.conns[slab_key];
+    if let Some(ref mut stream) = slot.stream {
+        // The stream was deregistered while paused (handle_send's
+        // write_limit == 0 path). mio requires `register` after
+        // `deregister`; `reregister` would fail (the error is ignored),
+        // leaving no writable interest armed. With pause_until cleared
+        // above, nothing would wake the connection, so a response needing
+        // another throttled window would hang indefinitely.
+        let _ = server
+            .poll
+            .registry()
+            .register(stream, token, Interest::WRITABLE);
+    } else {
+        close_connection(server, slab_key);
+        return Ok(());
+    }
+
+    handle_send(server, slab_key)
 }
 
 /// Drain remaining bytes from the socket before closing.
@@ -1666,9 +2140,120 @@ fn transition_to_sending(server: &mut Server, slab_key: usize) {
     }
 
     let token = conn_token(slab_key);
+
+    // Capture filename for throttle check (avoids borrow conflict with slot)
+    let filename = server.conns[slab_key].http.orig_filename.clone();
+
+    // CGI responses are already charged a flat CGI_BYTECOUNT on completion;
+    // do not re-admit them here, which would double-count the output (once
+    // as the fixed CGI charge and again as live response bytes) and hold a
+    // fresh num_sending slot until the client drains the response.
+    let is_cgi = server.conns[slab_key].is_cgi;
+
+    // Fill in the header length for responses that didn't set it explicitly
+    // (the static-200 path does; error responses built via build_full_response
+    // do not). This keeps throttle body accounting header-free and lets the
+    // access log report entity (body) bytes rather than header-inclusive
+    // bytes, matching the CERN/thttpd bytes field. CGI responses keep a zero
+    // header length: they are logged as the full stream and are not
+    // throttle-re-admitted.
+    if !is_cgi {
+        let mime_flag = server.conns[slab_key].http.mime_flag;
+        let hdr_len = server.conns[slab_key].http.response_header_len;
+        if mime_flag && hdr_len == 0 {
+            let end = header_end_offset(&server.conns[slab_key].http.response);
+            if let Some(end) = end {
+                server.conns[slab_key].http.response_header_len = end;
+            }
+        }
+    }
+
+    // Throttle admission check — skipped when the caller already ran it
+    // upstream (e.g. serve_static does a pre-check before mmap'ing the
+    // file body, setting checked=true).
+    let already_checked = server.conns[slab_key].throttle.checked;
+    let throttle_action = if !is_cgi && !already_checked {
+        if let Some(ref mut throttles) = server.throttles {
+            match throttles.check_request(throttle_match_path(&filename)) {
+                ThrottleDecision::Allow {
+                    tnums,
+                    max_limit,
+                    min_limit,
+                } => Some(ThrottleAction::Allow {
+                    tnums,
+                    max_limit,
+                    min_limit,
+                }),
+                ThrottleDecision::Reject => Some(ThrottleAction::Reject),
+                ThrottleDecision::Unlimited => None,
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     let slot = &mut server.conns[slab_key];
     slot.state = ConnState::Sending;
     slot.http.bytes_sent = 0;
+
+    if already_checked && slot.throttle.is_throttled() {
+        slot.throttle.header_len = slot.http.response_header_len;
+        let now = Instant::now();
+        slot.throttle.started_at = Some(now);
+        slot.throttle.active_at = Some(now);
+    }
+
+    if let Some(action) = throttle_action {
+        match action {
+            ThrottleAction::Allow {
+                tnums,
+                max_limit,
+                min_limit,
+            } => {
+                slot.throttle.tnums = tnums;
+                slot.throttle.max_limit = max_limit;
+                slot.throttle.min_limit = min_limit;
+                slot.throttle.header_len = slot.http.response_header_len;
+                let now = Instant::now();
+                slot.throttle.started_at = Some(now);
+                slot.throttle.active_at = Some(now);
+            }
+            ThrottleAction::Reject => {
+                // Build 503 response inline
+                let user_agent = slot.http.user_agent.clone();
+                let body = error_page(
+                    503,
+                    "Service Unavailable",
+                    "The requested URL '%.80s' is temporarily over its bandwidth limit.\n",
+                    &filename,
+                    Some(&user_agent),
+                );
+                let http_ref = &slot.http;
+                let response = build_full_response(
+                    http_ref,
+                    503,
+                    "Service Unavailable",
+                    "text/html",
+                    -1,
+                    0,
+                    &[],
+                );
+                let full_response = if http_ref.mime_flag {
+                    let mut r = response;
+                    r.extend_from_slice(&body);
+                    r
+                } else {
+                    body
+                };
+                slot.http.response = full_response;
+                slot.http.response_len = slot.http.response.len();
+                slot.http.status_code = 503;
+                slot.http.response_header_len = header_end_offset(&slot.http.response).unwrap_or(0);
+            }
+        }
+    }
 
     if let Some(ref mut stream) = slot.stream {
         let _ = server
@@ -1709,6 +2294,78 @@ fn close_connection(server: &mut Server, slab_key: usize) {
         return;
     }
 
+    // 1. Extract data for access logging and throttle cleanup before
+    //    taking a mutable borrow on the slot (avoids borrow conflicts).
+    let (
+        status_code,
+        bytes_sent,
+        peer_addr_str,
+        method_str,
+        url_str,
+        protocol_str,
+        referer_str,
+        ua_str,
+        throttle_info,
+    ) = {
+        let slot = &server.conns[slab_key];
+        let peer_addr_str = if !slot.http.x_forwarded_for.is_empty() {
+            slot.http.x_forwarded_for.clone()
+        } else {
+            slot.peer_addr
+                .map(|a| a.ip().to_string())
+                .unwrap_or_else(|| "-".to_string())
+        };
+        let method_str = slot.http.method.as_str().to_string();
+        let url_str = slot.http.encoded_url.clone();
+        let protocol_str = if slot.http.mime_flag {
+            slot.http.http_version.clone()
+        } else {
+            String::new()
+        };
+        let referer_str = slot.http.referer.clone();
+        let ua_str = slot.http.user_agent.clone();
+        let throttle_info: Option<Vec<usize>> = if slot.throttle.is_throttled() {
+            Some(slot.throttle.tnums.clone())
+        } else {
+            None
+        };
+        (
+            logged_status_code(&slot.http),
+            entity_bytes_sent(slot.http.bytes_sent, slot.http.response_header_len),
+            peer_addr_str,
+            method_str,
+            url_str,
+            protocol_str,
+            referer_str,
+            ua_str,
+            throttle_info,
+        )
+    };
+
+    // 2. Access logging: log completed requests only
+    if status_code > 0 {
+        let entry = LogEntry {
+            remote_addr: &peer_addr_str,
+            remote_user: "-",
+            method: &method_str,
+            url: &url_str,
+            protocol: &protocol_str,
+            status: status_code,
+            bytes_sent,
+            referer: &referer_str,
+            user_agent: &ua_str,
+        };
+        server.access_log.log_request(&entry);
+    }
+
+    // 3. Release throttle resources
+    if let Some(tnums) = throttle_info {
+        if let Some(ref mut throttles) = server.throttles {
+            throttles.clear(&tnums);
+        }
+    }
+
+    // 4. Deregister and clean up
     let slot = &mut server.conns[slab_key];
     if let Some(ref mut stream) = slot.stream {
         let _ = server.poll.registry().deregister(stream);
@@ -1720,6 +2377,49 @@ fn close_connection(server: &mut Server, slab_key: usize) {
 
     slot.state = ConnState::Free;
     server.conns.remove(slab_key);
+}
+
+fn logged_status_code(http: &thttpd_http::HttpConn) -> u16 {
+    if http.status_code > 0 {
+        return http.status_code;
+    }
+
+    status_code_from_response(&http.response).unwrap_or(0)
+}
+
+fn status_code_from_response(response: &[u8]) -> Option<u16> {
+    let first_line_end = response.windows(2).position(|w| w == b"\r\n")?;
+    let first_line = std::str::from_utf8(&response[..first_line_end]).ok()?;
+    let mut parts = first_line.split_whitespace();
+    let protocol = parts.next()?;
+    if !protocol.starts_with("HTTP/") {
+        return None;
+    }
+    parts.next()?.parse().ok()
+}
+
+/// Offset of the first byte *after* the blank-line header terminator
+/// (`\r\n\r\n`, or `\n\n`), i.e. where the entity body begins. `None` when
+/// the response has no header separator. build_full_response always ends its
+/// header block with `\r\n\r\n`, so this yields the exact header length for
+/// normal HTTP/1.x responses.
+fn header_end_offset(response: &[u8]) -> Option<usize> {
+    if let Some(pos) = response.windows(4).position(|w| w == b"\r\n\r\n") {
+        return Some(pos + 4);
+    }
+    response
+        .windows(2)
+        .position(|w| w == b"\n\n")
+        .map(|pos| pos + 2)
+}
+
+/// Bytes to report in the access log's CERN `bytes` field: the entity body
+/// bytes actually sent, with the status line + headers excluded. `bytes_sent`
+/// accumulates every byte written from `http.response`; subtract the header
+/// length (clamped at 0 for partial sends / HTTP/0.9) to match thttpd's
+/// header-excluding accounting (libhttpd.c write path subtracts `responselen`).
+fn entity_bytes_sent(bytes_sent: i64, header_len: usize) -> i64 {
+    (bytes_sent - header_len as i64).max(0)
 }
 
 /// Build a complete HTTP error response.
@@ -1755,4 +2455,777 @@ fn extract_header(headers: &[u8], name: &str) -> Option<String> {
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ServerConfig;
+    use crate::logging::AccessLogger;
+    use crate::throttle::ThrottleTable;
+    use mio::net::TcpStream;
+    use std::io::Read;
+    use std::net::{TcpListener, TcpStream as StdTcpStream};
+
+    fn test_server(config: ServerConfig) -> Server {
+        let access_log = AccessLogger::open(&config).unwrap();
+        Server::new(config, Vec::new(), access_log).unwrap()
+    }
+
+    fn throttle_table(contents: &str) -> ThrottleTable {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut file, contents.as_bytes()).unwrap();
+        ThrottleTable::load(file.path()).unwrap()
+    }
+
+    fn static_file_server(
+        file_name: &str,
+        contents: &[u8],
+    ) -> (tempfile::TempDir, Server, std::path::PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let file_path = root.path().join(file_name);
+        std::fs::write(&file_path, contents).unwrap();
+
+        let config = ServerConfig {
+            dir: root.path().to_path_buf(),
+            ..ServerConfig::default()
+        };
+        let server = test_server(config);
+        (root, server, file_path)
+    }
+
+    #[test]
+    fn throttled_static_response_uses_saved_header_length() {
+        let mut server = test_server(ServerConfig::default());
+        server.throttles = Some(throttle_table("**.html 1000\n"));
+        let key = server.conns.insert(ConnSlot::new());
+        let slot = &mut server.conns[key];
+        slot.http.orig_filename = "/index.html".to_string();
+        slot.http.response = b"header-body".to_vec();
+        slot.http.response_len = slot.http.response.len();
+        slot.http.response_header_len = 6;
+
+        transition_to_sending(&mut server, key);
+
+        let slot = &server.conns[key];
+        assert_eq!(slot.throttle.header_len, 6);
+        assert!(slot.throttle.is_throttled());
+    }
+
+    #[test]
+    fn throttled_send_caps_body_bytes_to_allowance() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = StdTcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server_stream, _) = listener.accept().unwrap();
+        server_stream.set_nonblocking(true).unwrap();
+
+        let mut server = test_server(ServerConfig::default());
+        // 1 byte/sec ceiling, so the cap is tiny relative to the 4 MiB body
+        // and the socket buffer can accept far more than the allowance.
+        server.throttles = Some(throttle_table("**.bin 1\n"));
+        let key = server.conns.insert(ConnSlot::new());
+        let slot = &mut server.conns[key];
+        slot.stream = Some(TcpStream::from_std(server_stream));
+        slot.http.orig_filename = "/big.bin".to_string();
+        slot.http.response = vec![b'x'; 4 * 1024 * 1024];
+        slot.http.response[..4].copy_from_slice(b"HEAD");
+        slot.http.response_len = slot.http.response.len();
+        slot.http.response_header_len = 4;
+        transition_to_sending(&mut server, key);
+
+        handle_send(&mut server, key).unwrap();
+
+        let slot = &server.conns[key];
+        // Headers (4 bytes) are free; only the 1-byte body allowance is sent.
+        assert!(slot.throttle.body_bytes > 0);
+        assert_eq!(
+            server.throttles.as_ref().unwrap().entries()[0].bytes_since_avg,
+            slot.throttle.body_bytes
+        );
+        // The cap keeps us far below the full response even though the socket
+        // could accept the whole buffer at once.
+        assert!(slot.http.bytes_sent < slot.http.response_len as i64);
+        assert_eq!(slot.state, ConnState::Sending);
+
+        // The body allowance for this window is now exhausted: the next send
+        // pauses for the one-second throttle window instead of writing more.
+        handle_send(&mut server, key).unwrap();
+        assert_eq!(server.conns[key].state, ConnState::Pausing);
+        drop(client);
+    }
+
+    #[test]
+    fn throttle_resume_registers_stream_after_pause_deregister() {
+        // Regression for the throttle-resume registration bug: handle_send
+        // deregisters the stream when the body allowance is exhausted, so the
+        // resume path must RE-REGISTER it. mio rejects `reregister` on a
+        // deregistered source and the error was ignored, leaving the
+        // connection with no writable interest and no pause deadline — any
+        // response needing another throttled window hung indefinitely.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = StdTcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server_stream, _) = listener.accept().unwrap();
+        server_stream.set_nonblocking(true).unwrap();
+
+        let mut server = test_server(ServerConfig::default());
+        let key = server.conns.insert(ConnSlot::new());
+        let header_len = 4usize;
+        {
+            let slot = &mut server.conns[key];
+            slot.stream = Some(TcpStream::from_std(server_stream));
+            slot.state = ConnState::Sending;
+            slot.http.response = vec![b'x'; 204];
+            slot.http.response[..header_len].copy_from_slice(b"HEAD");
+            slot.http.response_len = slot.http.response.len();
+            slot.http.response_header_len = header_len;
+            // Non-empty tnums marks the connection as throttled; the body
+            // ceiling is 10 bytes/sec.
+            slot.throttle.tnums = vec![0];
+            slot.throttle.max_limit = 10;
+            slot.throttle.header_len = header_len;
+            slot.throttle.started_at = Some(Instant::now());
+        }
+
+        let token = conn_token(key);
+        // Arm writable, mirroring transition_to_sending's initial interest.
+        server
+            .poll
+            .registry()
+            .register(
+                server.conns[key].stream.as_mut().unwrap(),
+                token,
+                Interest::WRITABLE,
+            )
+            .unwrap();
+
+        // Window 1: send the free header + the 10-byte body allowance, then
+        // exhaust it and pause (handle_send deregisters the stream here).
+        handle_send(&mut server, key).unwrap();
+        assert_eq!(server.conns[key].state, ConnState::Sending);
+        handle_send(&mut server, key).unwrap();
+        assert_eq!(server.conns[key].state, ConnState::Pausing);
+
+        // Simulate the pause window elapsing with enough elapsed send-time
+        // that the resume write is throttle-capped short of completion (so
+        // handle_send re-arms writable via the "more to send" path rather
+        // than finishing the response).
+        server.conns[key].throttle.started_at =
+            Some(Instant::now() - Duration::from_secs(2));
+        server.conns[key].throttle.pause_until =
+            Some(Instant::now() - Duration::from_millis(1));
+
+        handle_pause(&mut server, key).unwrap();
+
+        // After resume the stream MUST be registered for writable; otherwise
+        // no future event re-enters handle_send and the response hangs.
+        // `reregister` succeeds only on an already-registered source.
+        assert_eq!(
+            server.conns[key].state,
+            ConnState::Sending,
+            "resume should leave the connection Sending"
+        );
+        let rereg = server.poll.registry().reregister(
+            server.conns[key].stream.as_mut().unwrap(),
+            token,
+            Interest::WRITABLE,
+        );
+        assert!(
+            rereg.is_ok(),
+            "stream must be registered after resume; got {rereg:?}"
+        );
+        drop(client);
+    }
+
+    #[test]
+    fn throttle_match_path_strips_a_single_leading_slash() {
+        assert_eq!(throttle_match_path("/index.html"), "index.html");
+        assert_eq!(throttle_match_path("/cgi-bin/foo"), "cgi-bin/foo");
+        // A path with no leading slash is returned unchanged.
+        assert_eq!(throttle_match_path("index.html"), "index.html");
+        assert_eq!(throttle_match_path("/"), "");
+    }
+
+    #[test]
+    fn single_star_rule_admits_slash_prefixed_path_after_normalization() {
+        // Loaded patterns are slash-stripped (throttle.rs parse_line), and a
+        // single `*` does not cross '/'. The raw request path keeps its
+        // leading slash, so only the normalized form matches.
+        let mut table = throttle_table("*.html 1000\n");
+        assert!(matches!(
+            table.check_request("/index.html"),
+            ThrottleDecision::Unlimited
+        ));
+        assert!(matches!(
+            table.check_request(throttle_match_path("/index.html")),
+            ThrottleDecision::Allow { .. }
+        ));
+    }
+
+    #[test]
+    fn static_precheck_matches_request_path_and_initializes_throttle_state() {
+        let root = tempfile::tempdir().unwrap();
+        let file_path = root.path().join("index.html");
+        std::fs::write(&file_path, b"hello").unwrap();
+
+        let config = ServerConfig {
+            dir: root.path().to_path_buf(),
+            ..ServerConfig::default()
+        };
+        let mut server = test_server(config);
+        server.throttles = Some(throttle_table("*.html 1000\n"));
+
+        let key = server.conns.insert(ConnSlot::new());
+        let slot = &mut server.conns[key];
+        slot.http.orig_filename = "/index.html".to_string();
+        slot.http.encoded_url = "/index.html".to_string();
+        slot.http.method = Method::Get;
+
+        serve_static(&mut server, key, &file_path);
+
+        let slot = &server.conns[key];
+        assert_eq!(slot.state, ConnState::Sending);
+        assert!(slot.throttle.checked);
+        assert!(slot.throttle.is_throttled());
+        assert_eq!(slot.throttle.header_len, slot.http.response_header_len);
+        assert!(slot.throttle.header_len > 0);
+        assert!(slot.throttle.started_at.is_some());
+        assert!(slot.throttle.active_at.is_some());
+        assert_eq!(
+            server.throttles.as_ref().unwrap().entries()[0].num_sending,
+            1
+        );
+    }
+
+    #[test]
+    fn static_precheck_reject_uses_sending_transition_bookkeeping() {
+        let (_root, mut server, file_path) = static_file_server("index.html", b"hello");
+        server.throttles = Some(throttle_table("*.html 5000-0\n"));
+
+        let key = server.conns.insert(ConnSlot::new());
+        let slot = &mut server.conns[key];
+        slot.http.orig_filename = "/index.html".to_string();
+        slot.http.encoded_url = "/index.html".to_string();
+        slot.http.method = Method::Get;
+
+        serve_static(&mut server, key, &file_path);
+
+        let slot = &server.conns[key];
+        assert_eq!(slot.state, ConnState::Sending);
+        assert_eq!(slot.http.status_code, 503);
+        assert!(slot.throttle.checked);
+        assert_eq!(slot.http.bytes_sent, 0);
+        assert_eq!(server.stats.requests, 1);
+        assert_eq!(slot.http.response_len, slot.http.response.len());
+        assert_eq!(
+            slot.http.response_header_len,
+            header_end_offset(&slot.http.response).unwrap()
+        );
+    }
+
+    #[test]
+    fn throttled_head_static_request_rejects_before_early_response() {
+        let (_root, mut server, file_path) = static_file_server("index.html", b"hello");
+        server.throttles = Some(throttle_table("*.html 5000-0\n"));
+
+        let key = server.conns.insert(ConnSlot::new());
+        let slot = &mut server.conns[key];
+        slot.http.orig_filename = "/index.html".to_string();
+        slot.http.encoded_url = "/index.html".to_string();
+        slot.http.method = Method::Head;
+
+        serve_static(&mut server, key, &file_path);
+
+        let slot = &server.conns[key];
+        assert_eq!(slot.state, ConnState::Sending);
+        assert_eq!(slot.http.status_code, 503);
+        assert!(slot.throttle.checked);
+        assert_eq!(slot.http.response_len, slot.http.response.len());
+        assert_eq!(
+            slot.http.response_header_len,
+            header_end_offset(&slot.http.response).unwrap()
+        );
+    }
+
+    #[test]
+    fn throttled_not_modified_static_request_rejects_before_early_response() {
+        let (_root, mut server, file_path) = static_file_server("index.html", b"hello");
+        server.throttles = Some(throttle_table("*.html 5000-0\n"));
+
+        let key = server.conns.insert(ConnSlot::new());
+        let slot = &mut server.conns[key];
+        slot.http.orig_filename = "/index.html".to_string();
+        slot.http.encoded_url = "/index.html".to_string();
+        slot.http.method = Method::Get;
+        slot.http.if_modified_since = Some(i64::MAX);
+
+        serve_static(&mut server, key, &file_path);
+
+        let slot = &server.conns[key];
+        assert_eq!(slot.state, ConnState::Sending);
+        assert_eq!(slot.http.status_code, 503);
+        assert!(slot.throttle.checked);
+        assert_eq!(slot.http.response_len, slot.http.response.len());
+        assert_eq!(
+            slot.http.response_header_len,
+            header_end_offset(&slot.http.response).unwrap()
+        );
+    }
+
+    #[test]
+    fn cgi_throttle_admission_uses_normalized_script_path() {
+        // resolved_script arrives as "/cgi-bin/foo"; admission must match the
+        // slash-stripped form against the loaded (slash-free) pattern.
+        let mut table = throttle_table("cgi-bin/** 1000\n");
+        assert!(matches!(
+            table.check_request("/cgi-bin/foo"),
+            ThrottleDecision::Unlimited
+        ));
+        assert!(matches!(
+            table.check_request(throttle_match_path("/cgi-bin/foo")),
+            ThrottleDecision::Allow { .. }
+        ));
+    }
+
+    #[test]
+    fn paused_connection_event_does_not_close_before_deadline() {
+        let mut server = test_server(ServerConfig::default());
+        let key = server.conns.insert(ConnSlot::new());
+        let slot = &mut server.conns[key];
+        slot.state = ConnState::Pausing;
+        slot.throttle.pause_until = Some(Instant::now() + Duration::from_secs(30));
+
+        handle_connection_event(&mut server, key).unwrap();
+
+        assert!(server.conns.contains(key));
+        assert_eq!(server.conns[key].state, ConnState::Pausing);
+    }
+
+    #[test]
+    fn close_connection_logs_actual_bytes_sent() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("access.log");
+        let config = ServerConfig {
+            logfile: Some(log_path.clone()),
+            ..ServerConfig::default()
+        };
+        let mut server = test_server(config);
+        let key = server.conns.insert(ConnSlot::new());
+        let slot = &mut server.conns[key];
+        slot.http.status_code = 200;
+        slot.http.bytes_sent = 321;
+        slot.http.method = Method::Get;
+        slot.http.encoded_url = "/index.html".to_string();
+        slot.http.http_version = "HTTP/1.0".to_string();
+        slot.http.mime_flag = true;
+
+        close_connection(&mut server, key);
+
+        let mut contents = String::new();
+        std::fs::File::open(log_path)
+            .unwrap()
+            .read_to_string(&mut contents)
+            .unwrap();
+        assert!(
+            contents.contains("\"GET /index.html HTTP/1.0\" 200 321"),
+            "{contents}"
+        );
+    }
+
+    #[test]
+    fn close_connection_logs_status_from_response_when_unset() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("access.log");
+        let config = ServerConfig {
+            logfile: Some(log_path.clone()),
+            ..ServerConfig::default()
+        };
+        let mut server = test_server(config);
+        let key = server.conns.insert(ConnSlot::new());
+        let slot = &mut server.conns[key];
+        slot.http.response = b"HTTP/1.0 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_vec();
+        slot.http.response_len = slot.http.response.len();
+        slot.http.bytes_sent = slot.http.response_len as i64;
+        slot.http.method = Method::Get;
+        slot.http.encoded_url = "/missing.html".to_string();
+        slot.http.http_version = "HTTP/1.0".to_string();
+        slot.http.mime_flag = true;
+
+        close_connection(&mut server, key);
+
+        let mut contents = String::new();
+        std::fs::File::open(log_path)
+            .unwrap()
+            .read_to_string(&mut contents)
+            .unwrap();
+        assert!(
+            contents.contains("\"GET /missing.html HTTP/1.0\" 404 "),
+            "{contents}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn no_symlink_check_allows_static_symlink_outside_root() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let outside_file = outside.path().join("outside.txt");
+        std::fs::write(&outside_file, b"outside").unwrap();
+        let link_path = root.path().join("link.txt");
+        symlink(&outside_file, &link_path).unwrap();
+
+        let checked_config = ServerConfig {
+            dir: root.path().to_path_buf(),
+            no_symlink_check: false,
+            ..ServerConfig::default()
+        };
+        let mut checked_server = test_server(checked_config);
+        let checked_key = checked_server.conns.insert(ConnSlot::new());
+        checked_server.conns[checked_key].http.method = Method::Get;
+        checked_server.conns[checked_key].http.encoded_url = "/link.txt".to_string();
+        serve_static(&mut checked_server, checked_key, &link_path);
+        assert_eq!(
+            logged_status_code(&checked_server.conns[checked_key].http),
+            403
+        );
+
+        let unchecked_config = ServerConfig {
+            dir: root.path().to_path_buf(),
+            no_symlink_check: true,
+            ..ServerConfig::default()
+        };
+        let mut unchecked_server = test_server(unchecked_config);
+        let unchecked_key = unchecked_server.conns.insert(ConnSlot::new());
+        unchecked_server.conns[unchecked_key].http.method = Method::Get;
+        unchecked_server.conns[unchecked_key].http.encoded_url = "/link.txt".to_string();
+        serve_static(&mut unchecked_server, unchecked_key, &link_path);
+        assert_eq!(
+            logged_status_code(&unchecked_server.conns[unchecked_key].http),
+            200
+        );
+    }
+
+    #[test]
+    fn cgi_response_is_not_re_admitted_to_throttle_table() {
+        // A response flagged is_cgi must bypass the throttle admission check
+        // so its output is not double-counted: CGI output is already charged
+        // a flat CGI_BYTECOUNT at CGI completion, and re-admitting it would
+        // bump num_sending again and rate-limit the response stream.
+        let mut server = test_server(ServerConfig::default());
+        server.throttles = Some(throttle_table("**.html 1000\n"));
+        let key = server.conns.insert(ConnSlot::new());
+        let slot = &mut server.conns[key];
+        slot.is_cgi = true;
+        // Same pattern/filename that DOES admit an ordinary request (see
+        // throttled_static_response_uses_saved_header_length), proving the
+        // skip is what keeps num_sending at 0.
+        slot.http.orig_filename = "/index.html".to_string();
+        slot.http.response = b"HTTP/1.0 200 OK\r\n\r\nbody".to_vec();
+        slot.http.response_len = slot.http.response.len();
+        slot.http.mime_flag = true;
+
+        transition_to_sending(&mut server, key);
+
+        // No admission: the throttle slot is untouched and the connection is
+        // not flagged throttled, so handle_send/close_connection won't act.
+        assert_eq!(
+            server.throttles.as_ref().unwrap().entries()[0].num_sending,
+            0
+        );
+        assert!(!server.conns[key].throttle.is_throttled());
+    }
+
+    #[test]
+    fn close_connection_logs_entity_bytes_excluding_headers() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("access.log");
+        let config = ServerConfig {
+            logfile: Some(log_path.clone()),
+            ..ServerConfig::default()
+        };
+        let mut server = test_server(config);
+        let key = server.conns.insert(ConnSlot::new());
+
+        let headers =
+            b"HTTP/1.0 404 Not Found\r\nContent-Type: text/html\r\nContent-Length: 12\r\n\r\n";
+        let body = b"hello world\n"; // 12 bytes
+        let mut response = headers.to_vec();
+        response.extend_from_slice(body);
+
+        let slot = &mut server.conns[key];
+        slot.http.response = response;
+        slot.http.response_len = slot.http.response.len();
+        slot.http.mime_flag = true;
+        slot.http.method = Method::Get;
+        slot.http.encoded_url = "/missing.html".to_string();
+        slot.http.http_version = "HTTP/1.0".to_string();
+
+        // transition_to_sending derives response_header_len from the blank
+        // line (error responses don't set it explicitly).
+        transition_to_sending(&mut server, key);
+        assert_eq!(server.conns[key].http.response_header_len, headers.len());
+
+        // Simulate the entire response being written to the socket.
+        server.conns[key].http.bytes_sent = server.conns[key].http.response_len as i64;
+
+        close_connection(&mut server, key);
+
+        let mut contents = String::new();
+        std::fs::File::open(&log_path)
+            .unwrap()
+            .read_to_string(&mut contents)
+            .unwrap();
+        // The CERN bytes field must hold the entity body length, not the
+        // header-inclusive total. Trailing " disambiguates from prefixes.
+        let expected = format!("\"GET /missing.html HTTP/1.0\" 404 {} \"", body.len());
+        assert!(
+            contents.contains(&expected),
+            "expected entity bytes {} in log: {contents}",
+            body.len()
+        );
+        let total = headers.len() + body.len();
+        let rejected = format!("\"GET /missing.html HTTP/1.0\" 404 {} \"", total);
+        assert!(
+            !contents.contains(&rejected),
+            "log must not contain header-inclusive bytes ({total}): {contents}"
+        );
+    }
+
+    #[test]
+    fn throttle_deadline_included_when_throttles_configured() {
+        let mut server = test_server(ServerConfig::default());
+        server.throttles = Some(throttle_table("**.html 1000\n"));
+        let last_update = Instant::now();
+        let deadline = next_throttle_deadline(&server, last_update);
+        assert!(deadline.is_some(), "throttle deadline must be present");
+        let d = deadline.unwrap();
+        // Should be approximately THROTTLE_TIME (2 s), not the 60 s fallback.
+        assert!(
+            d <= Duration::from_secs(THROTTLE_TIME as u64),
+            "deadline {d:?} must not exceed THROTTLE_TIME"
+        );
+        assert!(
+            d > Duration::from_secs(0),
+            "deadline {d:?} should still have time remaining"
+        );
+    }
+
+    #[test]
+    fn throttle_deadline_clamps_to_zero_when_overdue() {
+        let mut server = test_server(ServerConfig::default());
+        server.throttles = Some(throttle_table("**.html 1000\n"));
+        // Simulate an overdue update: last_update was well in the past.
+        let stale = Instant::now() - Duration::from_secs(120);
+        let deadline = next_throttle_deadline(&server, stale);
+        assert_eq!(deadline, Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn throttle_deadline_absent_when_no_throttle_table() {
+        let server = test_server(ServerConfig::default());
+        // No throttle_file → server.throttles is None.
+        let deadline = next_throttle_deadline(&server, Instant::now());
+        assert!(deadline.is_none());
+    }
+
+    #[test]
+    fn throttle_reject_logs_503_with_correct_header_length() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("access.log");
+        let config = ServerConfig {
+            logfile: Some(log_path.clone()),
+            ..ServerConfig::default()
+        };
+        let mut server = test_server(config);
+        // min_limit=5000, max_limit=0, rate=0 → rate < min_limit → Reject.
+        server.throttles = Some(throttle_table("**.html 5000-0\n"));
+
+        let key = server.conns.insert(ConnSlot::new());
+        let slot = &mut server.conns[key];
+        slot.http.orig_filename = "/index.html".to_string();
+        // Prepare a 200 response with a known header block so we can verify
+        // the 503 replacement recomputes header length from the new response.
+        let orig_headers =
+            b"HTTP/1.0 200 OK\r\nContent-Type: text/html\r\nContent-Length: 5\r\n\r\n";
+        let orig_body = b"hello";
+        slot.http.response = [orig_headers.as_ref(), orig_body].concat();
+        slot.http.response_len = slot.http.response.len();
+        slot.http.response_header_len = orig_headers.len();
+        slot.http.status_code = 200;
+        slot.http.mime_flag = true;
+        slot.http.method = Method::Get;
+        slot.http.encoded_url = "/index.html".to_string();
+        slot.http.http_version = "HTTP/1.0".to_string();
+
+        transition_to_sending(&mut server, key);
+
+        let slot = &server.conns[key];
+        // The 503 response must have replaced the 200.
+        assert_eq!(slot.http.status_code, 503);
+        // response_header_len must reflect the 503 header, not the original.
+        let expected_hdr_len = header_end_offset(&slot.http.response).unwrap();
+        assert_eq!(
+            slot.http.response_header_len, expected_hdr_len,
+            "header length must match the 503 replacement, not the original 200"
+        );
+        assert_eq!(slot.http.response_len, slot.http.response.len());
+
+        // Simulate the full 503 response being sent, then close to log it.
+        server.conns[key].http.bytes_sent = server.conns[key].http.response_len as i64;
+        close_connection(&mut server, key);
+
+        let mut contents = String::new();
+        std::fs::File::open(&log_path)
+            .unwrap()
+            .read_to_string(&mut contents)
+            .unwrap();
+        // The access log must show 503, not the original 200.
+        let expected = "\"GET /index.html HTTP/1.0\" 503";
+        assert!(
+            contents.contains(expected),
+            "log must contain 503 status: {contents}"
+        );
+        assert!(
+            !contents.contains("\"GET /index.html HTTP/1.0\" 200"),
+            "log must not contain original 200 status: {contents}"
+        );
+    }
+
+    #[test]
+    fn throttle_reject_sets_correct_header_length_for_304() {
+        // A 304 Not Modified response has no body; ensure the 503 replacement
+        // still recomputes header length correctly.
+        let mut server = test_server(ServerConfig::default());
+        // min_limit=5000, max_limit=0, rate=0 → rate < min_limit → Reject.
+        server.throttles = Some(throttle_table("**.html 5000-0\n"));
+
+        let key = server.conns.insert(ConnSlot::new());
+        let slot = &mut server.conns[key];
+        slot.http.orig_filename = "/index.html".to_string();
+        let orig_headers = b"HTTP/1.0 304 Not Modified\r\n\r\n";
+        slot.http.response = orig_headers.to_vec();
+        slot.http.response_len = slot.http.response.len();
+        slot.http.response_header_len = orig_headers.len();
+        slot.http.status_code = 304;
+        slot.http.mime_flag = true;
+
+        transition_to_sending(&mut server, key);
+
+        let slot = &server.conns[key];
+        assert_eq!(slot.http.status_code, 503);
+        let expected_hdr_len = header_end_offset(&slot.http.response).unwrap();
+        assert_eq!(slot.http.response_header_len, expected_hdr_len);
+    }
+    #[test]
+    fn deregistered_listener_with_pending_conn_does_not_spin() {
+        // A level-triggered readable listener keeps the event loop spinning.
+        // Deregistering the listener on drain start must prevent this.
+        let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = std_listener.local_addr().unwrap();
+        let mut listener = mio::net::TcpListener::from_std(std_listener);
+
+        let mut poll = mio::Poll::new().unwrap();
+        poll.registry()
+            .register(&mut listener, mio::Token(0), mio::Interest::READABLE)
+            .unwrap();
+
+        // Connect a client so the listener has a pending connection (readable).
+        let _client = std::net::TcpStream::connect(addr).unwrap();
+
+        // Before deregister: listener is reported as readable.
+        let mut events = mio::Events::with_capacity(8);
+        poll.poll(&mut events, Some(std::time::Duration::from_millis(100)))
+            .unwrap();
+        assert_eq!(
+            events.iter().count(),
+            1,
+            "listener should be readable before deregister"
+        );
+
+        // Deregister (what the drain fix does in the event loop).
+        poll.registry().deregister(&mut listener).unwrap();
+
+        // After deregister: no events despite the pending connection.
+        let mut events2 = mio::Events::with_capacity(8);
+        poll.poll(&mut events2, Some(std::time::Duration::from_millis(100)))
+            .unwrap();
+        assert_eq!(
+            events2.iter().count(),
+            0,
+            "deregistered listener must not produce events"
+        );
+    }
+
+    #[test]
+    fn close_connection_logs_x_forwarded_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("access.log");
+        let config = ServerConfig {
+            logfile: Some(log_path.clone()),
+            ..ServerConfig::default()
+        };
+        let mut server = test_server(config);
+        let key = server.conns.insert(ConnSlot::new());
+
+        let slot = &mut server.conns[key];
+        slot.http.status_code = 200;
+        slot.http.bytes_sent = 100;
+        slot.http.method = Method::Get;
+        slot.http.encoded_url = "/index.html".to_string();
+        slot.http.http_version = "HTTP/1.0".to_string();
+        slot.http.mime_flag = true;
+        slot.http.x_forwarded_for = "203.0.113.42".to_string();
+        slot.peer_addr = Some("127.0.0.1:9999".parse().unwrap());
+
+        close_connection(&mut server, key);
+
+        let mut contents = String::new();
+        std::fs::File::open(&log_path)
+            .unwrap()
+            .read_to_string(&mut contents)
+            .unwrap();
+        assert!(
+            contents.starts_with("203.0.113.42 "),
+            "log must start with XFF IP: {contents}"
+        );
+        assert!(
+            !contents.contains("127.0.0.1"),
+            "log must not contain socket peer: {contents}"
+        );
+    }
+
+    #[test]
+    fn close_connection_falls_back_to_peer_addr_without_xff() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("access.log");
+        let config = ServerConfig {
+            logfile: Some(log_path.clone()),
+            ..ServerConfig::default()
+        };
+        let mut server = test_server(config);
+        let key = server.conns.insert(ConnSlot::new());
+
+        let slot = &mut server.conns[key];
+        slot.http.status_code = 200;
+        slot.http.bytes_sent = 100;
+        slot.http.method = Method::Get;
+        slot.http.encoded_url = "/index.html".to_string();
+        slot.http.http_version = "HTTP/1.0".to_string();
+        slot.http.mime_flag = true;
+        // x_forwarded_for left empty
+        slot.peer_addr = Some("127.0.0.1:9999".parse().unwrap());
+
+        close_connection(&mut server, key);
+
+        let mut contents = String::new();
+        std::fs::File::open(&log_path)
+            .unwrap()
+            .read_to_string(&mut contents)
+            .unwrap();
+        assert!(
+            contents.starts_with("127.0.0.1 "),
+            "log must start with socket peer IP when no XFF: {contents}"
+        );
+    }
 }

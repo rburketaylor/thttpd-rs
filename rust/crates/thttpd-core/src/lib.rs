@@ -4,6 +4,7 @@
 pub mod config;
 pub mod connection;
 pub mod eventloop;
+pub mod logging;
 pub mod server;
 pub mod signal;
 pub mod startup;
