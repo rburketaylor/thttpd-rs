@@ -8,10 +8,10 @@
 > are backed by CI jobs or documented local commands; schedule and trigger
 > details are listed in the runtime-mitigation matrix.
 
-**Report date:** 2026-06-21
+**Report date:** 2026-06-23
 **Repository:** `thttpd-rs` (Rust port of sthttpd 2.27.0)
-**Revision:** current repository state at report date; replace with the release
-tag or commit SHA when publishing a fixed release artifact.
+**Revision:** repository state at commit `0b8edf1` (HEAD on `main`); replace
+with the release tag when publishing a fixed release artifact.
 
 ---
 

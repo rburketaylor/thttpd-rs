@@ -3,36 +3,31 @@
 This register separates verified request parity from incomplete operational
 compatibility. It should be updated whenever a deviation is fixed or accepted.
 The current entries below were rechecked against the Rust implementation on
-2026-06-21.
+2026-06-23.
 
 | Area | Legacy behavior | Current Rust behavior | Impact | Disposition |
 |---|---|---|---|---|
-| Bandwidth throttling | Enforces per-pattern transfer rates and fair sharing | Parses and unit-tests rules, but the event loop does not enforce them | Signature server feature is incomplete | Implement with timing-based differential tests |
-| Daemonization | Daemonizes unless `-D` is supplied | Remains in the foreground | Service-wrapper compatibility | Implement or require a process supervisor explicitly |
-| Request logging | Logs requests and reopens log files on SIGHUP | No persistent request log; SIGHUP is informational | Log rotation and access auditing differ | Add a logging owner to `Server` and test reopen behavior |
 | CGI resource control | Process behavior follows legacy fork/exec model and enforces `cgilimit` at request/CGI execution time | Parses `cgilimit` from CLI/config, but uses `Command` without runtime `cgilimit` enforcement, timeout, or output bounds | A hung, noisy, or over-concurrent CGI can consume resources | Add `cgilimit` admission checks, timeout, output cap, termination, and tests |
 | CGI working directory | Changes to the CGI directory | Inherits the server working directory | `PWD` differs and is normalized in tests | Decide whether to match legacy behavior |
 | `VHOST_DIRLEVELS` | Optional compile-time directory splitting | Omitted | Relevant only when the legacy option is enabled | Document build assumption or implement |
-| IPv6 listeners | Can bind IPv4 and IPv6 | Binds one resolved listener, normally IPv4 | IPv6-only clients cannot connect | Add dual-stack listener tests |
-| CLI compatibility | Supports legacy short flags such as `-h`, `-g`, and `-s` | Some short flags differ or are unavailable | Existing scripts may require changes | Complete an argv compatibility matrix |
-| Symlink/data-dir config | Supports `data_dir` and symlink directives | Recognizes and rejects them explicitly | Config migration stops with an actionable error | Implement before claiming full config parity |
 
 ## Implementation Notes
 
-- Throttling: `throttle.rs` parses and matches rules, but `eventloop.rs`
-  sends from `response[bytes_sent..]` directly and tracks only byte counters.
-- Daemon/logging: `ServerConfig` carries `daemonize` and `logfile`, but
-  `main.rs` has no daemonization step and SIGHUP handling is a placeholder.
 - CGI limits: `cgi.rs` launches scripts via `Command` and closes stdin, but
-  does not enforce `cgilimit`, timeout, output cap, or child termination policy.
-- IPv6: `startup.rs` builds one `host:port` address and returns a single
-  listener. The fdwatch crate reserves IPv4/IPv6 token names, but startup does
-  not yet bind a dual listener set.
+  does not enforce `cgilimit`, timeout, output cap, or child termination
+  policy. CGI stdout is read into an unbounded buffer, so a CGI that produces
+  runaway output is an unbounded-memory vector until the response completes.
 
 ## Recently Closed
 
 | Area | Resolution |
 |---|---|
+| Bandwidth throttling | `handle_send` caps body bytes to the per-window allowance, pauses when it is exhausted, accounts bytes against the throttle table, and resumes on fair-share recalibration (`eventloop.rs`). Verified by 12 `TestDifferentialThrottling` scenarios plus the throttle unit tests. |
+| Daemonization | `startup::daemonize` / `daemonize_with_handshake` perform the double-fork + `setsid` and reopen stdio onto `/dev/null`, toggled off by `-D` (`main.rs`). |
+| Request logging | `logging::LogTarget` appends to the configured logfile and reopens it on `SIGHUP` (`eventloop.rs`); the access log follows the legacy CERN/Common format. |
+| IPv6 listeners | `bind_listeners` binds `[::]:port` (v6only) and `0.0.0.0:port`, continuing if one family is unsupported, and binds every resolved address when `-h` is supplied (`startup.rs`). |
+| CLI compatibility | All legacy short flags are handled: `-h/-g/-s/-r/-v` via the argv-normalization shim and `-p/-d/-u/-l/-c/-T/-P/-M/-C/-t/-H/-i/-D/-V` via clap, with last-wins semantics covered by the legacy-argv tests. |
+| Symlink/data-dir config | `data_dir` and the `symlink`/`nosymlink` config directives are parsed and honored (`config.rs`). |
 | Comparison body hashes | Normalized mode now hashes normalized bodies instead of forcing a match |
 | Comparator coverage | Comparator unit tests are included in `make check` and CI |
 | Config-file handling | `-C` now parses supported legacy directives and rejects unknown/unsupported options |

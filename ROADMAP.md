@@ -10,7 +10,7 @@
 Before listing what's missing, what's here is worth naming — this is the
 foundation everything below builds on:
 
-- **Behavior-preserving Rust port of thttpd**, split across 8 crates with a single-threaded
+- **Behavior-preserving Rust port of thttpd**, split across 10 crates with a single-threaded
   `mio` event loop preserving the original C architecture
 - **Differential testing** — 105 differential scenarios that compare the C and Rust
   binaries field-by-field (status, headers, body, lifecycle). All pass.
@@ -271,7 +271,7 @@ concrete story the interviewer will remember after the conversation.
 | 1 | Strangler-fig proxy | implemented | [docs](docs/STRANGLER_FIG.md) |
 | 2 | Proxy observability | implemented | `/metrics`, tracing, request IDs |
 | 3 | Rollback runbook | implemented | [docs](docs/ROLLBACK.md) |
-| 4 | Config shim | todo | — |
+| 4 | Config shim | implemented | legacy argv matrix + `data_dir`/`symlink` directives |
 | 5 | Criterion benchmarks | todo | — |
 | 6 | Container + k8s | todo | — |
 | 7 | Security report + CI | implemented | [docs](docs/security/MIGRATION_REPORT.md) |
@@ -283,5 +283,6 @@ concrete story the interviewer will remember after the conversation.
 | 13 | proptest | todo | — |
 | 14 | CHANGELOG | todo | — |
 | 15 | Man pages | todo | — |
+| — | Runtime parity | implemented | throttling, daemonization, request logging, IPv6 dual-stack |
 
-Last updated: 2026-06-16.
+Last updated: 2026-06-23.

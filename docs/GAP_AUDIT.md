@@ -1,12 +1,12 @@
 # Gap Audit and Interview Readiness
 
-**Updated:** 2026-06-21
+**Updated:** 2026-06-23
 
 ## Verified Strengths
 
 - 105 C-vs-Rust differential scenarios exercise status, headers, body, and connection behavior.
 - 80 C-only scenarios validate the reference fixtures.
-- 193 Rust workspace unit tests cover server and proxy internals.
+- 256 Rust workspace unit tests cover server and proxy internals.
 - 63 comparator tests verify that the parity oracle catches drift.
 - 31 proxy integration tests cover routing, shadow mode, health, circuit breaker, rollback, metrics, and drain behavior.
 - `cargo fmt`, workspace clippy with `-D warnings`, tests, dependency policy, and integration checks are represented by `make verify` and CI.
@@ -16,10 +16,11 @@
 
 ## Highest Remaining Risks
 
-1. Runtime bandwidth throttling is not wired into response scheduling. The parser and rule matcher exist, but `handle_send` writes the full remaining response buffer without consulting throttle state.
-2. Daemonization and request logging are incomplete. `daemonize` and `logfile` are parsed, but startup never forks/backgrounds and SIGHUP only reports that it would reopen the log.
-3. CGI execution lacks timeout, output bounds, resource limits, working-directory parity, and `cgilimit` enforcement. The implementation uses `std::process::Command` with piped stdio and closes stdin correctly, but it does not supervise runtime resource use.
-4. IPv6 and complete legacy argv/config compatibility remain incomplete. Startup binds one resolved listener from `host:port`; unsupported legacy config surfaces such as `data_dir` and symlink directives fail with actionable errors.
+1. CGI execution lacks timeout, output bounds, resource limits, and `cgilimit` enforcement. The implementation uses `std::process::Command` with piped stdio and closes stdin correctly, but it does not supervise runtime resource use; CGI stdout is read into an unbounded buffer.
+2. CGI working directory differs from legacy (the server's working directory is inherited rather than the CGI directory); this is normalized away in the differential suite via the `PWD` normalizer.
+3. `VHOST_DIRLEVELS` compile-time directory splitting is intentionally omitted.
+
+Throttling, daemonization, request logging, IPv6 dual-stack listeners, and full legacy argv/config compatibility have since reached parity — see the "Recently Closed" section of the authoritative list.
 
 The authoritative list is `docs/KNOWN_DEVIATIONS.md`.
 

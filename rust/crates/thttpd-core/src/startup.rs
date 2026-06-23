@@ -286,6 +286,10 @@ pub fn daemonize(keep_stdout: bool) -> Result<(), String> {
         use std::os::fd::AsFd;
 
         // First fork: detach from the controlling terminal.
+        // SAFETY: fork() is only unsafe for multithreaded programs, where
+        // another thread may hold a lock across the fork. daemonize runs early
+        // in startup, before the mio event loop or any helper thread exists, so
+        // the process is single-threaded here and the hazard does not apply.
         match unsafe { fork() }.map_err(|e| format!("first fork: {e}"))? {
             ForkResult::Parent { child } => {
                 let _ = child;
@@ -296,6 +300,8 @@ pub fn daemonize(keep_stdout: bool) -> Result<(), String> {
         setsid().map_err(|e| format!("setsid: {e}"))?;
 
         // Second fork: guarantee we cannot reacquire a controlling terminal.
+        // SAFETY: still single-threaded between forks (setsid does not spawn
+        // threads), so the same fork-safety justification holds.
         match unsafe { fork() }.map_err(|e| format!("second fork: {e}"))? {
             ForkResult::Parent { child } => {
                 let _ = child;
@@ -343,6 +349,10 @@ pub fn daemonize_with_handshake(keep_stdout: bool) -> Result<DaemonHandshake, St
     let (read_fd, write_fd) = nix::unistd::pipe().map_err(|e| format!("pipe: {e}"))?;
 
     // First fork: detach from the controlling terminal.
+    // SAFETY: fork() is only unsafe for multithreaded programs, where
+    // another thread may hold a lock across the fork. daemonize runs early
+    // in startup, before the mio event loop or any helper thread exists, so
+    // the process is single-threaded here and the hazard does not apply.
     match unsafe { fork() }.map_err(|e| format!("first fork: {e}"))? {
         ForkResult::Parent { .. } => {
             // Close write end (so the pipe breaks when the child exits).
@@ -361,6 +371,8 @@ pub fn daemonize_with_handshake(keep_stdout: bool) -> Result<DaemonHandshake, St
     setsid().map_err(|e| format!("setsid: {e}"))?;
 
     // Second fork: guarantee we cannot reacquire a controlling terminal.
+    // SAFETY: still single-threaded between forks (setsid does not spawn
+    // threads), so the same fork-safety justification holds.
     match unsafe { fork() }.map_err(|e| format!("second fork: {e}"))? {
         ForkResult::Parent { .. } => {
             std::process::exit(0);

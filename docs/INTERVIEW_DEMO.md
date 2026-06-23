@@ -126,10 +126,10 @@ The credibility point:
 Numbers to cite:
 
 - 105 C-vs-Rust differential scenarios
-- 193 Rust unit tests
+- 256 Rust unit tests
 - 63 comparator unit tests
 - 31 proxy integration tests
-- 472 automated tests total
+- 535 automated tests total
 
 Evidence:
 

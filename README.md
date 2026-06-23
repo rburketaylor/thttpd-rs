@@ -16,13 +16,13 @@ behavior:
 
 ## Verification
 
-The repository currently contains **472 automated tests**:
+The repository currently contains **535 automated tests**:
 
 | Layer | Tests | Purpose |
 |---|---:|---|
 | C-vs-Rust differential scenarios | 105 | Compare externally observable request behavior |
 | Legacy C harness scenarios | 80 | Prove fixtures and scenarios against the reference server |
-| Rust workspace unit tests | 193 | Verify server and proxy internals, including parser, protocol, cache, timer, auth, routing, shadow diffing, health, and control-plane behavior |
+| Rust workspace unit tests | 256 | Verify server and proxy internals, including parser, protocol, cache, timer, auth, routing, shadow diffing, health, and control-plane behavior |
 | Comparator unit tests | 63 | Prove that the differential oracle detects meaningful drift |
 | Proxy integration tests | 31 | Exercise `thttpd-migrate` routing, shadowing, health, circuit breaker, rollback, metrics, and drain behavior |
 
@@ -30,7 +30,7 @@ Run the complete gate with:
 
 ```bash
 python3 -m pip install -r requirements-dev.txt
-cargo install cargo-audit cargo-deny --locked
+cargo install cargo-audit cargo-deny cargo-geiger --locked
 make verify
 ```
 
@@ -67,16 +67,19 @@ that are not yet parity-complete.
 The Rust port preserves the original single-threaded, event-driven design and
 uses `mio` directly rather than introducing an async runtime.
 
-```text
-thttpd-core
-├── thttpd-http       request parsing, auth, CGI, responses, directory listing
-├── thttpd-fdwatch    mio-based readiness polling
-├── thttpd-timers     timer wheel
-├── thttpd-mmc        memory-mapped file cache
-├── thttpd-match      shell-style glob matching
-├── thttpd-tdate      HTTP date parsing
-└── thttpd-mime       MIME and content-encoding lookup
-```
++```text
++thttpd-core          single-threaded mio event loop; the server binary
++├── thttpd-http      request parsing, CGI, responses, directory listing
++│   └── thttpd-auth  crypt(3) authentication (.htpasswd / Basic auth)
++├── thttpd-fdwatch   mio-based readiness polling
++├── thttpd-timers    timer wheel
++├── thttpd-mmc       memory-mapped file cache
++├── thttpd-match     shell-style glob matching
++├── thttpd-tdate     HTTP date parsing
++└── thttpd-mime      MIME and content-encoding lookup
++
++thttpd-migrate       strangler-fig migration proxy (separate binary)
++```
 
 The `legacy/` directory is intentionally retained. It is the reference
 implementation used by the characterization and differential suites, not dead
