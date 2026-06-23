@@ -1,6 +1,8 @@
 /target
 rust/target/
 rust/fuzz/target/
+rust/fuzz/corpus/
+rust/fuzz/artifacts/
 __pycache__/
 *.o
 legacy/src/thttpd

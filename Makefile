@@ -8,7 +8,7 @@ help:
 	@printf '%s\n' \
 	  'make check        format, clippy, Rust tests, comparator tests, knowledge validation' \
 	  'make integration  build both servers and run C-only plus differential tests' \
-	  'make security     run cargo-audit and cargo-deny (must be installed)' \
+	  'make security     run cargo-audit, cargo-deny, and unsafe audit (must be installed)' \
 	  'make verify       run check, security, and integration' \
 	  'make demo         run the short interview demonstration'
 
