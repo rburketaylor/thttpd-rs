@@ -2609,10 +2609,8 @@ mod tests {
         // that the resume write is throttle-capped short of completion (so
         // handle_send re-arms writable via the "more to send" path rather
         // than finishing the response).
-        server.conns[key].throttle.started_at =
-            Some(Instant::now() - Duration::from_secs(2));
-        server.conns[key].throttle.pause_until =
-            Some(Instant::now() - Duration::from_millis(1));
+        server.conns[key].throttle.started_at = Some(Instant::now() - Duration::from_secs(2));
+        server.conns[key].throttle.pause_until = Some(Instant::now() - Duration::from_millis(1));
 
         handle_pause(&mut server, key).unwrap();
 
