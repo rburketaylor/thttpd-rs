@@ -135,7 +135,7 @@ port is a curiosity, not a candidate.
 
 These prove the new system is *better* than the old one, not just *different*.
 
-### 7. Security comparison report + CI
+### 7. Security comparison report + CI — implemented
 
 **What:** a public `docs/security/MIGRATION_REPORT.md` that maps every
 historical CVE in `sthttpd` / `thttpd` to its CWE class and to the Rust
@@ -147,20 +147,27 @@ receipts — "12 CVEs were filed against thttpd, 9 of those classes are
 structurally impossible in our code, the remaining 3 are caught by Miri in
 CI" — is not.
 
-**Status:** plan written → `.rpiv/artifacts/plans/2026-06-12_16-30-00_security-report.md`
+**Status:** implemented. The report lives in
+`docs/security/MIGRATION_REPORT.md`; local checks are wired through
+`make security`; CI jobs cover supply-chain policy, unsafe audit, Miri, ASan,
+fuzz smoke tests, and release SBOM generation.
 
-### 8. `cargo-fuzz` harness on the HTTP parser
+### 8. `cargo-fuzz` harness on the HTTP parser — implemented
 
 **What:** `fuzz/fuzz_targets/parse_request.rs` (and `parse_url.rs`,
 `parse_header.rs`). Differential tests prove C and Rust agree on *known*
-inputs; fuzzing proves Rust is robust against inputs the C never saw. 10
-minutes in CI on every PR catches regressions in parser hardening.
+inputs; fuzzing proves Rust is robust against inputs the C never saw. The
+current CI job runs bounded nightly smoke fuzzing; longer fuzz campaigns remain
+a local/manual activity.
 
 **Why it matters:** fuzzing is one of the few ways to find security-relevant
 bugs that the type system doesn't catch. Hiring managers who have been
 through CVE postmortems recognize it.
 
-**Effort:** half a day to set up, then incrementally add targets.
+**Status:** implemented for `parse_request` and `parse_url` under
+`rust/fuzz/`. The GitHub Actions fuzz job runs both targets as bounded nightly
+smoke tests and can be dispatched manually. A `parse_header` target remains a
+possible incremental addition.
 
 ### 9. Architecture Decision Records
 
@@ -238,13 +245,13 @@ unless noted.
 |---|------|-----------|----------------|
 | 1 | **ADRs** (#9) | — | Foundational. Informs every other plan. Half a day. |
 | 2 | **Strangler-fig proxy** (#1) | ADR on `mio`/`tokio` split | Shipped. Keep it in the demo path and maintain the proxy integration gate. |
-| 3 | **Security report + CI** (#7) | — | Plan is already written. Establishes the safety-with-receipts story in CI from day 1. |
+| 3 | **Security report + CI** (#7) | — | Shipped. Keep it current as security-relevant implementation changes land. |
 | 4 | **Criterion benchmarks** (#5) | — | Empirical data backs every future claim. The "4× more compact" line becomes "p99 0.4ms vs 0.6ms at 1k req/s." |
 | 5 | **Observability** (#2) | — | Shipped for the proxy; extend with any server-specific metrics as needed. |
 | 6 | **Container + k8s** (#6) | #2 (observability) | Deployable Monday. |
 | 7 | **Config shim** (#4) | — | Independent. |
 | 8 | **Rollback runbook** (#3) | #2 (strangler proxy CLI) | Shipped with the proxy control plane. |
-| 9 | **cargo-fuzz** (#8) | — | Independent. Adds to security story. |
+| 9 | **cargo-fuzz** (#8) | — | Shipped for parser and URL targets. Add narrower targets only when they expose a distinct risk. |
 | 10 | **Load tests** (#10) | #1 (strangler proxy) | Proves the proxy works under load. |
 | 11 | **proptest** (#13) | — | Quick wins on pure functions. |
 | 12 | **cargo-mutants** (#12) | — | Independent. |
@@ -267,8 +274,8 @@ concrete story the interviewer will remember after the conversation.
 | 4 | Config shim | todo | — |
 | 5 | Criterion benchmarks | todo | — |
 | 6 | Container + k8s | todo | — |
-| 7 | Security report + CI | planned | [link](.rpiv/artifacts/plans/2026-06-12_16-30-00_security-report.md) |
-| 8 | cargo-fuzz | todo | — |
+| 7 | Security report + CI | implemented | [docs](docs/security/MIGRATION_REPORT.md) |
+| 8 | cargo-fuzz | implemented | [fuzz](rust/fuzz) |
 | 9 | ADRs | accepted | [docs](docs/ADR-0002-async-runtime-split.md) |
 | 10 | Load tests | todo | — |
 | 11 | MkDocs site | todo | — |

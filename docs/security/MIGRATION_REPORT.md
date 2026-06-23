@@ -4,12 +4,14 @@
 > classes that affected the C thttpd family. The request-parsing crate
 > (`thttpd-http`) contains **zero** `unsafe` tokens (enforced in CI), the hot
 > parsers are clean under Miri and AddressSanitizer, and the remaining
-> `unsafe` lives in three small, audited OS-boundary crates. Every claim below
-> is backed by a CI job that runs on every commit.
+> `unsafe` lives in three small, audited OS-boundary crates. The claims below
+> are backed by CI jobs or documented local commands; schedule and trigger
+> details are listed in the runtime-mitigation matrix.
 
 **Report date:** 2026-06-21
 **Repository:** `thttpd-rs` (Rust port of sthttpd 2.27.0)
-**Commit:** `3afe7c0`
+**Revision:** current repository state at report date; replace with the release
+tag or commit SHA when publishing a fixed release artifact.
 
 ---
 
@@ -149,7 +151,7 @@ Local equivalents: [`pipeline/run_security_scan.sh`](../../pipeline/run_security
 - **Performance under attack** (DoS, resource exhaustion).
 
 ### Reproducing this report
-1. Clone the repo at commit `3afe7c0`.
+1. Clone the repo at the release tag or commit being audited.
 2. Run `bash pipeline/run_security_scan.sh` (the supply-chain + unsafe-budget
    claims — Claim 2, 5, 6).
 3. Run Miri and ASan locally per [`RUNNING_LOCALLY.md`](RUNNING_LOCALLY.md)

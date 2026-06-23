@@ -1,6 +1,6 @@
 # Gap Audit and Interview Readiness
 
-**Updated:** 2026-06-16
+**Updated:** 2026-06-21
 
 ## Verified Strengths
 
@@ -12,13 +12,14 @@
 - `cargo fmt`, workspace clippy with `-D warnings`, tests, dependency policy, and integration checks are represented by `make verify` and CI.
 - Legacy configuration parsing, bind-before-setuid startup, pidfile writing, and unreadable-password-file behavior are implemented.
 - `thttpd-migrate` is implemented as the side-by-side migration path with active-active/canary routing, shadow diffing, health checks, circuit breaker, request IDs, `/metrics`, control socket rollback, and drain.
+- Security migration evidence is implemented: historical CVE mapping, unsafe-boundary audit, `cargo-audit` / `cargo-deny` / `cargo-geiger`, Miri, ASan, cargo-fuzz smoke targets, and release SBOM workflow artifacts are present in the tree.
 
 ## Highest Remaining Risks
 
-1. Runtime bandwidth throttling is not wired into response scheduling.
-2. Daemonization and request logging are incomplete; SIGHUP cannot reopen a persistent log yet.
-3. CGI execution lacks timeout, output bounds, resource limits, and `cgilimit` enforcement.
-4. IPv6 and complete legacy argv/config compatibility remain incomplete.
+1. Runtime bandwidth throttling is not wired into response scheduling. The parser and rule matcher exist, but `handle_send` writes the full remaining response buffer without consulting throttle state.
+2. Daemonization and request logging are incomplete. `daemonize` and `logfile` are parsed, but startup never forks/backgrounds and SIGHUP only reports that it would reopen the log.
+3. CGI execution lacks timeout, output bounds, resource limits, working-directory parity, and `cgilimit` enforcement. The implementation uses `std::process::Command` with piped stdio and closes stdin correctly, but it does not supervise runtime resource use.
+4. IPv6 and complete legacy argv/config compatibility remain incomplete. Startup binds one resolved listener from `host:port`; unsupported legacy config surfaces such as `data_dir` and symlink directives fail with actionable errors.
 
 The authoritative list is `docs/KNOWN_DEVIATIONS.md`.
 
