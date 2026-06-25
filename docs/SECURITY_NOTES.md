@@ -51,7 +51,7 @@ It does not yet provide:
 - runtime concurrency enforcement for parsed `cgilimit`
 
 These are recorded as operational deviations in
-[Known Deviations](KNOWN_DEVIATIONS.md) rather than hidden behind the
+[Risks](RISKS.md) rather than hidden behind the
 request-parity result. A hardened deployment should use a supervisor or sandbox
 until native controls are implemented and tested.
 

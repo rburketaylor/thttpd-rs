@@ -37,11 +37,11 @@ runs shadow diffing, health probing, and a control plane — all concurrently.
 - The proxy brings additional transitive dependencies (tokio, hyper,
   metrics-exporter-prometheus, etc.). All are permissively licensed and pass
   `cargo deny` (see `deny.toml`).
-- Once migration completes (see `docs/MIGRATION_PLAYBOOK.md`), the proxy is
+- Once migration completes (see `docs/MIGRATION.md`), the proxy is
   decommissioned and the dependency surface shrinks again.
 
 ## References
 
 - Implementation: `rust/crates/thttpd-migrate`
 - Martin Fowler, *StranglerFigApplication* (2004)
-- User guide: `docs/STRANGLER_FIG.md`
+- User guide: `docs/MIGRATION.md`

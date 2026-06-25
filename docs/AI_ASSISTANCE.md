@@ -108,6 +108,6 @@ habit of testing the tools that test the code.
 - The failure and the three bugs: [`JOURNEY.md`](../JOURNEY.md)
 - The comparison engine and its tests: [`harness/diff_engine.py`](../harness/diff_engine.py), [`harness/test_diff_engine.py`](../harness/test_diff_engine.py)
 - The 105 differential scenarios: [`harness/tests/test_differential.py`](../harness/tests/test_differential.py)
-- Known gaps, each with a disposition: [`KNOWN_DEVIATIONS.md`](KNOWN_DEVIATIONS.md)
+- Known gaps, each with a disposition: [`RISKS.md`](RISKS.md)
 - The runtime decision: [`ADR-0002-async-runtime-split.md`](ADR-0002-async-runtime-split.md)
 - Planning records and model reviews: [`.rpiv/artifacts/`](../.rpiv/artifacts/)

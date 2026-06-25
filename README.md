@@ -59,27 +59,27 @@ Current normalizers are limited to:
 - dynamically allocated CGI ports and host values
 - CGI `PWD`, where the legacy process changes directory and the Rust process does not
 
-See [Known Deviations](docs/KNOWN_DEVIATIONS.md) for the operational surfaces
-that are not yet parity-complete.
+See [Risks](docs/RISKS.md) for the operational surfaces that are not yet
+parity-complete.
 
 ## Architecture
 
 The Rust port preserves the original single-threaded, event-driven design and
 uses `mio` directly rather than introducing an async runtime.
 
-+```text
-+thttpd-core          single-threaded mio event loop; the server binary
-+├── thttpd-http      request parsing, CGI, responses, directory listing
-+│   └── thttpd-auth  crypt(3) authentication (.htpasswd / Basic auth)
-+├── thttpd-fdwatch   mio-based readiness polling
-+├── thttpd-timers    timer wheel
-+├── thttpd-mmc       memory-mapped file cache
-+├── thttpd-match     shell-style glob matching
-+├── thttpd-tdate     HTTP date parsing
-+└── thttpd-mime      MIME and content-encoding lookup
-+
-+thttpd-migrate       strangler-fig migration proxy (separate binary)
-+```
+```text
+thttpd-core          single-threaded mio event loop; the server binary
+├── thttpd-http      request parsing, CGI, responses, directory listing
+│   └── thttpd-auth  crypt(3) authentication (.htpasswd / Basic auth)
+├── thttpd-fdwatch   mio-based readiness polling
+├── thttpd-timers    timer wheel
+├── thttpd-mmc       memory-mapped file cache
+├── thttpd-match     shell-style glob matching
+├── thttpd-tdate     HTTP date parsing
+└── thttpd-mime      MIME and content-encoding lookup
+
+thttpd-migrate       strangler-fig migration proxy (separate binary)
+```
 
 The `legacy/` directory is intentionally retained. It is the reference
 implementation used by the characterization and differential suites, not dead
@@ -140,18 +140,18 @@ ASan, and cargo-fuzz.
 ## Interview Path
 
 Start with the presenter-first walkthrough in
-[docs/INTERVIEW_DEMO.md](docs/INTERVIEW_DEMO.md). It provides a 5-7 minute talk
+[docs/INTERVIEW.md](docs/INTERVIEW.md). It provides a 5-7 minute talk
 track, live demo command, transitions, recovery lines, and links to deeper
 evidence so the discussion does not turn into reading the repository aloud.
 
 Use [`JOURNEY.md`](JOURNEY.md) for the migration case study,
-[`docs/KNOWN_DEVIATIONS.md`](docs/KNOWN_DEVIATIONS.md) for honest gap tracking,
-[`docs/STRANGLER_FIG.md`](docs/STRANGLER_FIG.md) for cutover mechanics, and
+[`docs/RISKS.md`](docs/RISKS.md) for honest gap tracking,
+[`docs/MIGRATION.md`](docs/MIGRATION.md) for cutover mechanics, and
 [`docs/AI_ASSISTANCE.md`](docs/AI_ASSISTANCE.md) for how AI output was verified.
 
 The reusable method is documented in
-[docs/REFACTOR_PLAYBOOK.md](docs/REFACTOR_PLAYBOOK.md). The five-minute project
-walkthrough is in [docs/INTERVIEW_DEMO.md](docs/INTERVIEW_DEMO.md).
+[docs/REFACTOR.md](docs/REFACTOR.md). The five-minute project
+walkthrough is in [docs/INTERVIEW.md](docs/INTERVIEW.md).
 
 ## Migration Tools
 
@@ -162,9 +162,7 @@ checks, a circuit breaker, Prometheus `/metrics`, request-id propagation, a Unix
 control socket, one-command rollback, and graceful drain without modifying
 either server.
 
-- User guide & architecture: [docs/STRANGLER_FIG.md](docs/STRANGLER_FIG.md)
-- Rollback runbook: [docs/ROLLBACK.md](docs/ROLLBACK.md)
-- Week-by-week plan: [docs/MIGRATION_PLAYBOOK.md](docs/MIGRATION_PLAYBOOK.md)
+- Complete migration guide: [docs/MIGRATION.md](docs/MIGRATION.md)
 - Control-socket protocol: [docs/CONTROL_PROTOCOL.md](docs/CONTROL_PROTOCOL.md)
 - Async-runtime decision: [docs/ADR-0002-async-runtime-split.md](docs/ADR-0002-async-runtime-split.md)
 

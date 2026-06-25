@@ -1,9 +1,28 @@
-# Known Deviations
+# Risks and Known Deviations
 
-This register separates verified request parity from incomplete operational
-compatibility. It should be updated whenever a deviation is fixed or accepted.
-The current entries below were rechecked against the Rust implementation on
-2026-06-23.
+**Updated:** 2026-06-23
+
+## Status at a Glance
+
+- **105** C-vs-Rust differential scenarios passing
+- **256** Rust workspace unit tests
+- **63** comparator tests verifying the oracle
+- **31** proxy integration tests
+- **535** automated tests total
+
+## Verified Strengths
+
+- 105 C-vs-Rust differential scenarios exercise status, headers, body, and connection behavior.
+- 80 C-only scenarios validate the reference fixtures.
+- 256 Rust workspace unit tests cover server and proxy internals.
+- 63 comparator tests verify that the parity oracle catches drift.
+- 31 proxy integration tests cover routing, shadow mode, health, circuit breaker, rollback, metrics, and drain behavior.
+- `cargo fmt`, workspace clippy with `-D warnings`, tests, dependency policy, and integration checks are represented by `make verify` and CI.
+- Legacy configuration parsing, bind-before-setuid startup, pidfile writing, and unreadable-password-file behavior are implemented.
+- `thttpd-migrate` is implemented as the side-by-side migration path with active-active/canary routing, shadow diffing, health checks, circuit breaker, request IDs, `/metrics`, control socket rollback, and drain.
+- Security migration evidence is implemented: historical CVE mapping, unsafe-boundary audit, `cargo-audit` / `cargo-deny` / `cargo-geiger`, Miri, ASan, cargo-fuzz smoke targets, and release SBOM workflow artifacts are present in the tree.
+
+## Known Deviations
 
 | Area | Legacy behavior | Current Rust behavior | Impact | Disposition |
 |---|---|---|---|---|
@@ -13,10 +32,7 @@ The current entries below were rechecked against the Rust implementation on
 
 ## Implementation Notes
 
-- CGI limits: `cgi.rs` launches scripts via `Command` and closes stdin, but
-  does not enforce `cgilimit`, timeout, output cap, or child termination
-  policy. CGI stdout is read into an unbounded buffer, so a CGI that produces
-  runaway output is an unbounded-memory vector until the response completes.
+- CGI limits: `cgi.rs` launches scripts via `Command` and closes stdin, but does not enforce `cgilimit`, timeout, output cap, or child termination policy. CGI stdout is read into an unbounded buffer, so a CGI that produces runaway output is an unbounded-memory vector until the response completes.
 
 ## Recently Closed
 
@@ -34,3 +50,17 @@ The current entries below were rechecked against the Rust implementation on
 | Privileged bind ordering | Listeners bind after chroot and before setuid/setgid |
 | Pidfile | The configured pidfile is written during successful startup |
 | Unreadable `.htpasswd` | Returns the legacy 403 result instead of 401 |
+
+## Claim Boundary
+
+The supported claim is **behavior-preserving request handling under 105
+characterized scenarios**, plus a shipped proxy migration path covered by 31
+integration tests. It is not yet a full operational drop-in replacement.
+The normalized comparison profile still compares body hashes after applying only
+documented normalizers.
+
+## See also
+
+- [INTERVIEW.md](INTERVIEW.md) — interview presenter script
+- [JOURNEY.md](../JOURNEY.md) — migration case study
+- [MIGRATION.md](MIGRATION.md) — migration guide

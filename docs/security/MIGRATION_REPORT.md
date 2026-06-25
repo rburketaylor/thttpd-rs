@@ -144,7 +144,7 @@ Local equivalents: [`pipeline/run_security_scan.sh`](../../pipeline/run_security
 ### What we do NOT measure
 - **Logic bugs** in business rules (CGI throttling, auth edge cases) — these
   require manual review and are enumerated in
-  [`docs/KNOWN_DEVIATIONS.md`](../KNOWN_DEVIATIONS.md).
+  [`docs/RISKS.md`](../RISKS.md).
 - **0-day vulnerabilities** discovered after this report's date.
 - **Deployment vulnerabilities** (TLS misconfiguration, chroot escape via
   misconfig, exposed CGI without a supervisor).

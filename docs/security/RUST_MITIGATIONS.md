@@ -33,7 +33,7 @@
   touch request parsing. Miri + ASan (Phase 4) exercise the safe wrappers around
   these boundaries.
 - **Low** — the class is reachable only via a *logic* bug no compile-time check
-  can prevent; enumerated in [`docs/KNOWN_DEVIATIONS.md`](../KNOWN_DEVIATIONS.md).
+  can prevent; enumerated in [`docs/RISKS.md`](../RISKS.md).
   No row in this table is Low.
 
 ## Boundary crates (the audited `unsafe` surface)

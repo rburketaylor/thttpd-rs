@@ -64,7 +64,7 @@ poll() → accept connections
 ```
 
 This deliberately matches thttpd's original architecture. Operational gaps are
-tracked in `../docs/KNOWN_DEVIATIONS.md` rather than hidden behind a drop-in
+tracked in `../docs/RISKS.md` rather than hidden behind a drop-in
 replacement claim.
 
 `thttpd-migrate` is intentionally separate migration tooling. It uses

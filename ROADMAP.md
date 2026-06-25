@@ -66,7 +66,7 @@ honest answer is "incrementally, with the ability to revert quickly" —
 and this proxy is the artifact that proves you can do it.
 
 **Status:** implemented in `rust/crates/thttpd-migrate`, documented in
-`docs/STRANGLER_FIG.md`, and covered by 31 proxy integration tests.
+`docs/MIGRATION.md`, and covered by 31 proxy integration tests.
 
 ### 2. Observability — `tracing` + `/metrics` — implemented
 
@@ -83,7 +83,7 @@ Rollback updates routing immediately for new selections while in-flight
 requests continue normally.
 
 **Status:** implemented as `rollback --to ...` and documented in
-`docs/ROLLBACK.md` and `docs/CONTROL_PROTOCOL.md`.
+`docs/MIGRATION.md` and `docs/CONTROL_PROTOCOL.md`.
 
 ## Tier S — remaining production migration work
 
@@ -268,9 +268,9 @@ concrete story the interviewer will remember after the conversation.
 
 | # | Item | Status | Plan |
 |---|------|--------|------|
-| 1 | Strangler-fig proxy | implemented | [docs](docs/STRANGLER_FIG.md) |
+| 1 | Strangler-fig proxy | implemented | [docs](docs/MIGRATION.md) |
 | 2 | Proxy observability | implemented | `/metrics`, tracing, request IDs |
-| 3 | Rollback runbook | implemented | [docs](docs/ROLLBACK.md) |
+| 3 | Rollback runbook | implemented | [docs](docs/MIGRATION.md) |
 | 4 | Config shim | implemented | legacy argv matrix + `data_dir`/`symlink` directives |
 | 5 | Criterion benchmarks | todo | — |
 | 6 | Container + k8s | todo | — |
