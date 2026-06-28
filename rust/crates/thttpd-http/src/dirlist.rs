@@ -19,8 +19,19 @@ pub fn generate_listing(dir: &Path, url_path: &str) -> std::io::Result<Vec<u8>> 
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().to_string();
-        let metadata = entry.metadata()?;
-        let lstat = fs::symlink_metadata(dir.join(&name)).unwrap_or_else(|_| metadata.clone());
+        // lstat first so a broken symlink renders instead of aborting the
+        // whole listing.  C's ls() does lstat() then stat(); a stat() failure
+        // on the (missing) target does not stop the listing — it just shows
+        // the symlink entry using its lstat data.
+        let lstat = match fs::symlink_metadata(dir.join(&name)) {
+            Ok(m) => m,
+            // Entry vanished between read_dir and lstat — skip it rather than
+            // failing the entire directory listing.
+            Err(_) => continue,
+        };
+        // Followed metadata: for a broken symlink this fails, so fall back to
+        // the symlink's own (lstat) metadata.
+        let metadata = entry.metadata().unwrap_or_else(|_| lstat.clone());
         entries.push(DirEntry {
             name,
             metadata,
@@ -281,5 +292,34 @@ mod tests {
         assert_eq!(url_encode("hello.txt"), "hello.txt");
         assert_eq!(url_encode("foo bar"), "foo%20bar");
         assert_eq!(url_encode("test<file>"), "test%3Cfile%3E");
+    }
+
+    #[test]
+    fn test_broken_symlink_renders() {
+        // A broken symlink must not abort the whole listing.  The old code
+        // used `entry.metadata()?`, which follows the symlink and errors on a
+        // missing target, failing the entire directory listing.
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("real.txt"), b"hello").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            // broken: target does not exist
+            symlink("/nonexistent/target", dir.path().join("dangling")).unwrap();
+            // valid symlink alongside it
+            symlink("real.txt", dir.path().join("goodlink")).unwrap();
+        }
+
+        let html = generate_listing(dir.path(), "/d/").unwrap();
+        let s = String::from_utf8(html).unwrap();
+        // All three real entries plus the symlinks must be present.
+        assert!(s.contains("real.txt"));
+        #[cfg(unix)]
+        {
+            assert!(s.contains("dangling"));
+            assert!(s.contains("goodlink"));
+            // Broken symlink rendered as a symlink ('l' mode / '@' class).
+            assert!(s.contains("-&gt; "));
+        }
     }
 }
