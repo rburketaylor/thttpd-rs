@@ -8,24 +8,28 @@
 /// `?` (single char), `|` (alternation — OR of sub-patterns).
 pub fn match_pattern(pattern: &str, filename: &str) -> bool {
     // Handle alternation: split on '|' and match any sub-pattern.
+    // `|` is ASCII so byte-splitting is safe.
     for sub in pattern.split('|') {
-        if match_single(sub, filename) {
+        if match_single(sub.as_bytes(), filename.as_bytes()) {
             return true;
         }
     }
     false
 }
 
-fn match_single(pattern: &str, filename: &str) -> bool {
+/// Byte-oriented matcher — matches C's `match_one()`, which treats strings as
+/// raw byte arrays (`char*`). `?` consumes one byte, `*` consumes a run of
+/// non-`/` bytes, `**` consumes any run of bytes. Operating on `&[u8]`
+/// instead of slicing `&str` keeps non-ASCII (multibyte UTF-8) paths from
+/// panicking on a non-char-boundary slice.
+fn match_single(pattern: &[u8], filename: &[u8]) -> bool {
     let mut pi = 0;
     let mut fi = 0;
-    let pbytes = pattern.as_bytes();
-    let fbytes = filename.as_bytes();
 
-    while pi < pbytes.len() {
-        match pbytes[pi] {
+    while pi < pattern.len() {
+        match pattern[pi] {
             b'?' => {
-                if fi >= fbytes.len() {
+                if fi >= filename.len() {
                     return false;
                 }
                 pi += 1;
@@ -33,29 +37,29 @@ fn match_single(pattern: &str, filename: &str) -> bool {
             }
             b'*' => {
                 // Check for double-star (globstar)
-                if pi + 1 < pbytes.len() && pbytes[pi + 1] == b'*' {
+                if pi + 1 < pattern.len() && pattern[pi + 1] == b'*' {
                     // `**` matches anything including slashes
                     pi += 2;
-                    if pi >= pbytes.len() {
+                    if pi >= pattern.len() {
                         return true; // trailing ** matches everything
                     }
-                    // Try matching remaining pattern at every position
-                    for try_fi in fi..=fbytes.len() {
+                    // Try matching remaining pattern at every byte position
+                    for try_fi in fi..=filename.len() {
                         if match_single(&pattern[pi..], &filename[try_fi..]) {
                             return true;
                         }
                     }
                     return false;
                 } else {
-                    // Single `*` matches any chars except `/`
+                    // Single `*` matches any bytes except `/`
                     pi += 1;
-                    if pi >= pbytes.len() {
-                        // Trailing * matches remaining non-slash chars
-                        return !fbytes[fi..].contains(&b'/');
+                    if pi >= pattern.len() {
+                        // Trailing * matches remaining non-slash bytes
+                        return !filename[fi..].contains(&b'/');
                     }
-                    // Try matching 0..N non-slash chars
-                    for try_fi in fi..=fbytes.len() {
-                        if try_fi > fi && fbytes[try_fi - 1] == b'/' {
+                    // Try matching 0..N non-slash bytes
+                    for try_fi in fi..=filename.len() {
+                        if try_fi > fi && filename[try_fi - 1] == b'/' {
                             break; // * doesn't cross /
                         }
                         if match_single(&pattern[pi..], &filename[try_fi..]) {
@@ -66,7 +70,7 @@ fn match_single(pattern: &str, filename: &str) -> bool {
                 }
             }
             _ => {
-                if fi >= fbytes.len() || pbytes[pi] != fbytes[fi] {
+                if fi >= filename.len() || pattern[pi] != filename[fi] {
                     return false;
                 }
                 pi += 1;
@@ -75,7 +79,7 @@ fn match_single(pattern: &str, filename: &str) -> bool {
         }
     }
 
-    fi == fbytes.len()
+    fi == filename.len()
 }
 
 #[cfg(test)]
@@ -128,5 +132,20 @@ mod tests {
     fn test_exact_match() {
         assert!(match_pattern("index.html", "index.html"));
         assert!(!match_pattern("index.html", "other.html"));
+    }
+
+    #[test]
+    fn test_non_ascii_wildcards_no_panic() {
+        // Non-ASCII (multibyte UTF-8) filenames matched against `*`/`**` must
+        // not panic.  The old code sliced the &str at arbitrary byte offsets,
+        // which panicked when a wildcard landed mid-character.
+        // 'café' = c a f 0xC3 0xA9 ; trailing '*' tries every byte offset.
+        assert!(match_pattern("caf*", "café"));
+        assert!(match_pattern("*é", "café"));
+        assert!(match_pattern("**", "café/naïve/file"));
+        assert!(match_pattern("*.html", "résumé.html"));
+        assert!(!match_pattern("café", "caff"));
+        // Single '*' still does not cross '/' even with multibyte bytes around.
+        assert!(!match_pattern("*é", "café/naïve"));
     }
 }

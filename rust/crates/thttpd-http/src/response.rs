@@ -185,6 +185,21 @@ pub fn build_full_response(
     out
 }
 
+/// Find the largest char boundary in `s` at or below `index`.
+///
+/// Mirrors the nightly `str::floor_char_boundary`. Used to make byte-based
+/// truncation (`%.80s` precision) UTF-8-safe without panicking.
+fn floor_char_boundary(s: &str, mut index: usize) -> usize {
+    if index >= s.len() {
+        s.len()
+    } else {
+        while !s.is_char_boundary(index) {
+            index -= 1;
+        }
+        index
+    }
+}
+
 /// HTML-escape a string for use in error pages (matches C's `defang()`).
 fn defang(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -212,8 +227,12 @@ pub fn error_page(
     let defanged = defang(arg);
 
     let body_message = if form.contains("%.80s") {
+        // C's `%.80s` caps the argument at 80 bytes.  We cap the *defanged*
+        // argument at 80 bytes but back off to the nearest UTF-8 char
+        // boundary at or below 80 so a multibyte character is never split
+        // (which would panic on str slicing and corrupt the page).
         let truncated = if defanged.len() > 80 {
-            &defanged[..80]
+            &defanged[..floor_char_boundary(&defanged, 80)]
         } else {
             &defanged
         };
@@ -351,6 +370,41 @@ mod tests {
     fn test_defang() {
         assert_eq!(defang("<script>"), "&lt;script&gt;");
         assert_eq!(defang("normal"), "normal");
+    }
+
+    #[test]
+    fn test_error_page_truncation_multibyte_no_panic() {
+        // A long multibyte argument must truncate near the 80-byte cap without
+        // panicking on a non-char-boundary slice.  The old `&defanged[..80]`
+        // panicked here because byte 80 fell inside a 4-byte UTF-8 sequence.
+        // Each 'é' is 2 bytes; build an arg well past 80 bytes.
+        let arg = "é".repeat(60); // 120 bytes
+        let html = error_page(
+            404,
+            "Not Found",
+            "The requested URL '%.80s' was not found on this server.\n",
+            &arg,
+            None,
+        );
+        // Must round-trip through UTF-8 cleanly (would panic inside if it
+        // sliced mid-character).
+        let s = String::from_utf8(html).unwrap();
+        assert!(s.contains("was not found on this server"));
+    }
+
+    #[test]
+    fn test_error_page_truncation_caps_at_80_bytes() {
+        // Pure-ASCII truncation still caps the arg at 80 bytes (C's `%.80s`).
+        let arg = "a".repeat(200);
+        let html = error_page(404, "Not Found", "X%.80sY", &arg, None);
+        let s = String::from_utf8(html).unwrap();
+        // Exactly 80 a's appear between the markers, not 81 and not 200.
+        assert!(
+            s.contains(&format!("X{}Y", "a".repeat(80))),
+            "arg must be capped at 80 bytes"
+        );
+        assert!(!s.contains(&format!("X{}Y", "a".repeat(81))));
+        assert!(!s.contains(&format!("X{}Y", "a".repeat(200))));
     }
 
     #[test]
