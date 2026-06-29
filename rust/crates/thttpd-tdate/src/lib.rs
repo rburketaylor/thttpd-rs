@@ -102,11 +102,15 @@ fn parse_rfc1123(s: &str) -> Option<i64> {
     if parts.len() != 6 {
         return None;
     }
+    // C's format ends with a literal " GMT" — require it.  A non-GMT date is
+    // rejected (matches legacy tdate_parse.c sscanf "... GMT").
+    if parts[5] != "GMT" {
+        return None;
+    }
     // parts[0] = "Sun," (weekday+comma) — skip
-    // parts[1] = day, parts[2] = month, parts[3] = year (or swapped with time)
+    // parts[1] = day, parts[2] = month, parts[3] = year
     let day: u32 = parts[1].parse().ok()?;
     let month = month_num(parts[2])?;
-    // parts[3] could be year or time depending on format; try year first
     let year: i32 = parts[3].parse().ok()?;
     let time_parts: Vec<&str> = parts[4].split(':').collect();
     if time_parts.len() != 3 {
@@ -121,10 +125,17 @@ fn parse_rfc1123(s: &str) -> Option<i64> {
 fn parse_rfc850(s: &str) -> Option<i64> {
     // "Sunday, 06-Nov-94 08:49:37 GMT"
     let parts: Vec<&str> = s.split([' ', ',']).filter(|p| !p.is_empty()).collect();
-    if parts.len() < 4 {
+    if parts.len() != 4 {
         return None;
     }
-    let date_parts: Vec<&str> = parts[0].split('-').collect();
+    // C's format ends with a literal " GMT" — require it.
+    if parts[3] != "GMT" {
+        return None;
+    }
+    // parts[0] = weekday ("Sunday"), parts[1] = "DD-Mon-YY", parts[2] = time.
+    // The old code read parts[0] (the weekday) as the date and so always
+    // returned None.
+    let date_parts: Vec<&str> = parts[1].split('-').collect();
     if date_parts.len() != 3 {
         return None;
     }
@@ -136,7 +147,7 @@ fn parse_rfc850(s: &str) -> Option<i64> {
     } else if year < 100 {
         year += 1900;
     }
-    let time_parts: Vec<&str> = parts[1].split(':').collect();
+    let time_parts: Vec<&str> = parts[2].split(':').collect();
     if time_parts.len() != 3 {
         return None;
     }
@@ -218,6 +229,26 @@ mod tests {
     fn test_rfc1123() {
         let ts = parse_http_date("Sun, 06 Nov 1994 08:49:37 GMT");
         assert_eq!(ts, Some(784111777));
+    }
+
+    #[test]
+    fn test_rfc1123_requires_gmt() {
+        // Non-GMT RFC 1123 must be rejected (legacy requires the "GMT" token).
+        assert_eq!(parse_http_date("Sun, 06 Nov 1994 08:49:37 PST"), None);
+        assert_eq!(parse_http_date("Sun, 06 Nov 1994 08:49:37"), None);
+    }
+
+    #[test]
+    fn test_rfc850_valid() {
+        // RFC 850: same instant as the RFC 1123 example.
+        let ts = parse_http_date("Sunday, 06-Nov-94 08:49:37 GMT");
+        assert_eq!(ts, Some(784111777));
+    }
+
+    #[test]
+    fn test_rfc850_requires_gmt() {
+        assert_eq!(parse_http_date("Sunday, 06-Nov-94 08:49:37 EST"), None);
+        assert_eq!(parse_http_date("Sunday, 06-Nov-94 08:49:37"), None);
     }
 
     #[test]
