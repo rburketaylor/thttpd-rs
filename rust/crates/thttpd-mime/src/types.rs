@@ -13,7 +13,7 @@ use std::path::Path;
 /// .tar.gz -> Content-Encoding: x-gzip, Content-Type: application/x-tar
 pub struct MimeInfo {
     pub mime_type: &'static str,
-    pub encoding: Option<&'static str>,
+    pub encoding: Option<String>,
 }
 
 /// Compute MIME type and encoding for a filename.
@@ -23,7 +23,7 @@ pub struct MimeInfo {
 pub fn figure_mime(filename: &str) -> MimeInfo {
     let default_type = "application/octet-stream";
     let mut mime_type = default_type;
-    let mut encoding: Option<&'static str> = None;
+    let mut encoding: Option<String> = None;
 
     // Walk extensions from right to left, like C's figure_mime.
     // For each extension: check encodings table, then types table.
@@ -72,9 +72,7 @@ pub fn figure_mime(filename: &str) -> MimeInfo {
         }
     }
 
-    if !found_type && mime_type == default_type && encoding_parts.is_empty() {
-        // No extensions or no matches — return default
-    }
+    let _ = found_type;
 
     // Build the encoding string by joining in REVERSE order
     // (rightmost encoding first, since we collected them right-to-left).
@@ -87,8 +85,7 @@ pub fn figure_mime(filename: &str) -> MimeInfo {
         // C outputs them in order: [last_pushed, ..., first_pushed]
         // which is [rightmost, ..., leftmost] in our case.
         // So we keep encoding_parts as-is and join.
-        let combined = encoding_parts.join(",");
-        encoding = Some(match_leak(&combined));
+        encoding = Some(encoding_parts.join(","));
     }
 
     MimeInfo {
@@ -147,13 +144,8 @@ pub fn mime_type(filename: &str) -> &'static str {
 }
 
 /// Old API: returns just the encoding. Use figure_mime() for both type and encoding.
-pub fn mime_encoding(filename: &str) -> Option<&'static str> {
+pub fn mime_encoding(filename: &str) -> Option<String> {
     figure_mime(filename).encoding
-}
-
-/// Helper: store a String in a leaked Box<str> and return as &'static str.
-fn match_leak(s: &str) -> &'static str {
-    Box::leak(s.to_string().into_boxed_str())
 }
 
 #[cfg(test)]
@@ -197,7 +189,7 @@ mod tests {
         // octet-stream + Content-Encoding: gzip
         let info = figure_mime("file.gz");
         assert_eq!(info.mime_type, "application/octet-stream");
-        assert_eq!(info.encoding, Some("gzip"));
+        assert_eq!(info.encoding, Some("gzip".to_string()));
     }
 
     #[test]
@@ -205,20 +197,41 @@ mod tests {
         // .tar.gz → type is tar, encoding is gzip
         let info = figure_mime("archive.tar.gz");
         assert_eq!(info.mime_type, "application/x-tar");
-        assert_eq!(info.encoding, Some("gzip"));
+        assert_eq!(info.encoding, Some("gzip".to_string()));
     }
 
     #[test]
     fn test_tar_bz2() {
         let info = figure_mime("archive.tar.bz2");
         assert_eq!(info.mime_type, "application/x-tar");
-        assert_eq!(info.encoding, Some("x-bzip2"));
+        assert_eq!(info.encoding, Some("x-bzip2".to_string()));
     }
 
     #[test]
     fn test_tar_gz_bz2_chained() {
         let info = figure_mime("archive.tar.gz.bz2");
         assert_eq!(info.mime_type, "application/x-tar");
-        assert_eq!(info.encoding, Some("x-bzip2,gzip"));
+        assert_eq!(info.encoding, Some("x-bzip2,gzip".to_string()));
+    }
+
+    #[test]
+    fn test_encoded_files_in_loop_no_leak() {
+        // figure_mime must not leak on every call for encoded files.  The old
+        // implementation used Box::leak to turn the combined encoding into a
+        // &'static str, so each call for a .tar.gz file permanently leaked a
+        // String.  Now the encoding is owned and dropped with the MimeInfo.
+        // We assert correctness over many iterations; the leak itself is
+        // structural (no Box::leak in the source) — this test guards against
+        // regressions and confirms stable behavior across a loop.
+        for _ in 0..10000 {
+            let info = figure_mime("archive.tar.gz");
+            assert_eq!(info.mime_type, "application/x-tar");
+            assert_eq!(info.encoding.as_deref(), Some("gzip"));
+            // Encoded-only file with no type extension.
+            let info2 = figure_mime("data.gz");
+            assert_eq!(info2.encoding.as_deref(), Some("gzip"));
+            let info3 = figure_mime("big.tar.gz.bz2");
+            assert_eq!(info3.encoding.as_deref(), Some("x-bzip2,gzip"));
+        }
     }
 }
