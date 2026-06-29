@@ -21,11 +21,19 @@ struct CacheEntry {
     size: u64,
 }
 
-/// Key for cache lookup: (device, inode).
+/// Key for cache lookup.
+///
+/// Mirrors C's `find_hash(ino, dev, size, ctime)` (legacy/src/mmc.c): the key
+/// includes size and status-change time so that an in-place overwrite or
+/// truncation of a file (same dev+ino, different size/ctime) misses the cache
+/// and re-maps, instead of serving the stale mapping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct FileKey {
     dev: u64,
     ino: u64,
+    size: u64,
+    ctime_sec: i64,
+    ctime_nsec: i64,
 }
 
 /// Error type for mmap cache operations.
@@ -75,12 +83,16 @@ impl MmapCache {
             FileKey {
                 dev: metadata.dev(),
                 ino: metadata.ino(),
+                size: metadata.len(),
+                ctime_sec: metadata.ctime(),
+                ctime_nsec: metadata.ctime_nsec(),
             }
         };
 
         #[cfg(not(unix))]
         let key = {
-            // Fallback: use path hash
+            // Fallback: use path hash + size so an in-place content/size
+            // change still misses the cache.
             use std::collections::hash_map::DefaultHasher;
             use std::hash::{Hash, Hasher};
             let mut hasher = DefaultHasher::new();
@@ -88,6 +100,9 @@ impl MmapCache {
             FileKey {
                 dev: 0,
                 ino: hasher.finish(),
+                size: metadata.len(),
+                ctime_sec: 0,
+                ctime_nsec: 0,
             }
         };
 
@@ -203,5 +218,29 @@ mod tests {
         let mut cache = MmapCache::new();
         let result = cache.map(Path::new("/nonexistent/file.txt"));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_remap_after_inplace_overwrite() {
+        // Overwriting a file in place keeps the same dev+ino but changes its
+        // size and ctime.  The cache must miss and re-map rather than serve
+        // the stale mapping (legacy keys on size+ctime via find_hash).
+        let mut cache = MmapCache::new();
+        let f = make_temp_file(b"original content here");
+        let path = f.path().to_path_buf();
+        let m1 = cache.map(&path).unwrap();
+        assert_eq!(&m1[..], b"original content here");
+        drop(m1);
+
+        // Truncate shorter with different content (same inode).
+        std::fs::write(&path, b"NEW short").unwrap();
+        let m2 = cache.map(&path).unwrap();
+        assert_eq!(&m2[..], b"NEW short", "must not serve stale mapping");
+        drop(m2);
+
+        // Grow again with yet different content (same inode).
+        std::fs::write(&path, b"now it is much longer than before").unwrap();
+        let m3 = cache.map(&path).unwrap();
+        assert_eq!(&m3[..], b"now it is much longer than before");
     }
 }
