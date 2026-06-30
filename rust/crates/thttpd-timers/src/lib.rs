@@ -101,25 +101,43 @@ impl TimerWheel {
         self.cancelled.contains(&id)
     }
 
-    /// Reset a timer to fire after `delay` from now.
-    /// This cancels the old timer and creates a new one.
+    /// Reset a timer to fire after `delay` from now, preserving its callback and
+    /// periodicity.  Returns the new timer id (the old id is invalidated), or
+    /// `None` if no live timer with `id` exists.
+    ///
+    /// Mirrors C's `tmr_reset()`, which re-sorts the timer in place reusing its
+    /// original callback.  The previous implementation installed a no-op
+    /// callback, so a reset timer would fire but never run its action.
     pub fn reset(&mut self, id: TimerId, delay: Duration) -> Option<TimerId> {
-        // Find the old timer to get its period, then cancel and re-create
-        let period = self
-            .heap
-            .iter()
-            .find(|e| e.0.id == id)
-            .and_then(|e| e.0.period);
-        self.cancel(id);
+        // The BinaryHeap has no random-access removal and the callback is not
+        // Clone, so drain it, pluck the matching entry, and rebuild.
+        let mut entries: Vec<TimerEntry> = self.heap.drain().map(|Reverse(e)| e).collect();
+        let pos = match entries.iter().position(|e| e.id == id) {
+            Some(p) => p,
+            None => {
+                // Not found — rebuild the heap unchanged and bail out.
+                self.heap = entries.into_iter().map(Reverse).collect();
+                return None;
+            }
+        };
+        // swap_remove is O(1); ordering is irrelevant for a heap rebuild.
+        let mut old = entries.swap_remove(pos);
+        self.heap = entries.into_iter().map(Reverse).collect();
+
+        let period = old.period;
+        // Move the original callback out so it survives the reset.
+        let callback = std::mem::replace(&mut old.callback, Box::new(|_: &TimerCtx| {}));
+        // Any lazy-cancel marker for the old id is now stale.
+        self.cancelled.remove(&id);
+
         let new_id = TimerId(self.next_id);
         self.next_id += 1;
-        let entry = TimerEntry {
+        self.heap.push(Reverse(TimerEntry {
             id: new_id,
             deadline: Instant::now() + delay,
             period,
-            callback: Box::new(|_| {}),
-        };
-        self.heap.push(Reverse(entry));
+            callback,
+        }));
         Some(new_id)
     }
 
@@ -262,5 +280,37 @@ mod tests {
         let mut ctx = TimerCtx;
         wheel.run(&mut ctx);
         assert!(*count.lock().unwrap() >= 1);
+    }
+
+    #[test]
+    fn test_reset_preserves_callback() {
+        // After reset, the timer's original callback must still fire.  The old
+        // implementation installed a no-op callback, so reset timers never ran
+        // their action.
+        let mut wheel = TimerWheel::new();
+        let fired = Arc::new(Mutex::new(false));
+        let fired_clone = fired.clone();
+        let id = wheel.create(
+            Duration::from_secs(60),
+            Box::new(move |_| {
+                *fired_clone.lock().unwrap() = true;
+            }),
+        );
+        // Reset to fire almost immediately.
+        let new_id = wheel.reset(id, Duration::from_millis(1));
+        assert!(new_id.is_some());
+        std::thread::sleep(Duration::from_millis(10));
+        let mut ctx = TimerCtx;
+        wheel.run(&mut ctx);
+        assert!(*fired.lock().unwrap(), "reset timer must fire its callback");
+    }
+
+    #[test]
+    fn test_reset_unknown_id_returns_none() {
+        let mut wheel = TimerWheel::new();
+        wheel.create(Duration::from_secs(5), Box::new(|_| {}));
+        // Bogus id must return None and leave the wheel intact.
+        assert_eq!(wheel.reset(TimerId(9999), Duration::from_millis(1)), None);
+        assert!(wheel.next_deadline().is_some());
     }
 }
