@@ -27,7 +27,7 @@
 | Area | Legacy behavior | Current Rust behavior | Impact | Disposition |
 |---|---|---|---|---|
 | CGI resource control | Process behavior follows legacy fork/exec model and enforces `cgilimit` at request/CGI execution time | Parses `cgilimit` from CLI/config, but uses `Command` without runtime `cgilimit` enforcement, timeout, or output bounds | A hung, noisy, or over-concurrent CGI can consume resources | Add `cgilimit` admission checks, timeout, output cap, termination, and tests |
-| CGI working directory | Changes to the CGI directory | Inherits the server working directory | `PWD` differs and is normalized in tests | Decide whether to match legacy behavior |
+| Directory-listing HTML escaping | C emits raw filenames verbatim (no `<`/`>` escaping) in `ls()` output | Rust `dirlist` likewise emits raw, unescaped filenames for byte-exact legacy parity | A filename containing `<script>` would render in a browser — an XSS vector if untrusted users can create files in a served directory | **Intentionally deferred** as a documented security deviation: changing the escaping alters legacy-visible output. Track as a separate security-hardening task (HTML-escape entry names while preserving the `%.80s` byte cap). |
 | `VHOST_DIRLEVELS` | Optional compile-time directory splitting | Omitted | Relevant only when the legacy option is enabled | Document build assumption or implement |
 
 ## Implementation Notes
@@ -50,6 +50,7 @@
 | Privileged bind ordering | Listeners bind after chroot and before setuid/setgid |
 | Pidfile | The configured pidfile is written during successful startup |
 | Unreadable `.htpasswd` | Returns the legacy 403 result instead of 401 |
+| CGI working directory | `execute_cgi` sets `Command::current_dir()` to the script's parent directory, matching legacy `chdir()` before `execve()` (`cgi.rs`, `eventloop.rs`). CGI scripts that read a relative path now resolve it from their own directory. |
 
 ## Claim Boundary
 

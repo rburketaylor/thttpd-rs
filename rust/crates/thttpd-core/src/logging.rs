@@ -414,6 +414,7 @@ mod tests {
         };
         let logger = AccessLogger::open(&cfg).unwrap();
         assert!(!logger.is_file_backed());
+        assert!(logger.is_stdout());
         assert!(matches!(logger.target, LogTarget::Stdout));
     }
 }

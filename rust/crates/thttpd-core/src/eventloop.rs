@@ -376,6 +376,28 @@ fn handle_read(server: &mut Server, slab_key: usize) -> io::Result<()> {
 
     server.conns[slab_key].http.read_idx += n;
 
+    // Resume a CGI POST dispatch that was deferred while the body was still
+    // arriving.  The request FSM has already fired GotRequest and produced a
+    // pending_cgi_body flag; once the full Content-Length body is buffered,
+    // re-dispatch the CGI directly (do not re-run the FSM / process_request).
+    if server.conns[slab_key].pending_cgi_body {
+        let body_complete = {
+            let http = &server.conns[slab_key].http;
+            match http.content_length {
+                Some(cl) if cl > 0 => {
+                    let body_start = http.checked_idx;
+                    body_start + (cl as usize) <= http.read_idx
+                }
+                _ => true,
+            }
+        };
+        if body_complete {
+            server.conns[slab_key].pending_cgi_body = false;
+            dispatch_cgi(server, slab_key, Path::new(""));
+        }
+        return Ok(());
+    }
+
     // Run the request-detection FSM
     let (result, new_checked, new_state) = {
         let http = &server.conns[slab_key].http;
@@ -1477,6 +1499,24 @@ fn dispatch_cgi(server: &mut Server, slab_key: usize, _script_path: &Path) {
     // Propagate the configured charset to the connection
     server.conns[slab_key].http.charset = server.config.charset.clone();
 
+    // CGI POST bodies may arrive split across multiple TCP reads.  C hands the
+    // raw socket fd to the CGI child, which reads the body directly; we buffer
+    // it instead, so defer dispatch until the full Content-Length body is
+    // buffered.  This early return happens before any counter mutation, so the
+    // later resume via handle_read can re-enter dispatch_cgi cleanly.
+    {
+        let http = &server.conns[slab_key].http;
+        if let Some(cl) = http.content_length {
+            if cl > 0 {
+                let body_start = http.checked_idx;
+                if body_start + (cl as usize) > http.read_idx {
+                    server.conns[slab_key].pending_cgi_body = true;
+                    return;
+                }
+            }
+        }
+    }
+
     // --- CGI limit enforcement (matching C's cgi_limit check at thttpd.c:220) ---
     if server.cgi_limit() > 0 && server.active_cgis >= server.cgi_limit() {
         let url = server.conns[slab_key].http.encoded_url.clone();
@@ -1587,13 +1627,12 @@ fn dispatch_cgi(server: &mut Server, slab_key: usize, _script_path: &Path) {
 
     let resolved_path = server.config.dir.join(&resolved_script[1..]);
 
-    // Set CGI working directory to script's parent (matching C behavior)
-    let _cgi_working_dir = resolved_path
+    // Set CGI working directory to the script's parent (matching C behavior:
+    // legacy/src/libhttpd.c:3497 chdir()s to the script directory before execve).
+    let cgi_working_dir = resolved_path
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| server.config.dir.clone());
-    // TODO: Execute CGI with working dir = script's parent directory.
-    // The current execute_cgi does not support setting the working directory.
 
     // --- CGI not-found check ---
     if !resolved_path.exists() || resolved_path.is_dir() {
@@ -1798,7 +1837,12 @@ fn dispatch_cgi(server: &mut Server, slab_key: usize, _script_path: &Path) {
     // is already charged a flat CGI_BYTECOUNT on completion below.
     server.conns[slab_key].is_cgi = true;
 
-    match thttpd_http::cgi::execute_cgi(&resolved_path, env, post_body.as_deref()) {
+    match thttpd_http::cgi::execute_cgi(
+        &resolved_path,
+        Some(&cgi_working_dir),
+        env,
+        post_body.as_deref(),
+    ) {
         Ok(mut cgi_result) => {
             let mut output = Vec::new();
             if let Some(stdout) = cgi_result.child.stdout.take() {

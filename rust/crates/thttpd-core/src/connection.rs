@@ -94,6 +94,11 @@ pub struct ConnSlot {
     /// `CGI_BYTECOUNT` on completion, so it must not be rate-limited a second
     /// time as if it were ordinary file bytes.
     pub is_cgi: bool,
+    /// True when a CGI POST dispatch has been deferred because the request body
+    /// (Content-Length bytes) has not finished arriving yet. While set, the
+    /// connection stays in `Reading` and `handle_read` accumulates body bytes
+    /// until the full body is buffered, then re-dispatches the CGI.
+    pub pending_cgi_body: bool,
 }
 
 impl ConnSlot {
@@ -105,6 +110,7 @@ impl ConnSlot {
             peer_addr: None,
             throttle: ConnThrottle::new(),
             is_cgi: false,
+            pending_cgi_body: false,
         }
     }
 

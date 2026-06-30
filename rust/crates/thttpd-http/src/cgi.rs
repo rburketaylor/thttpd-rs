@@ -115,18 +115,33 @@ pub fn build_envp(ctx: &CgiContext, script_path: &str, cgi_pattern: &str) -> Vec
 }
 
 /// Execute a CGI script.
+///
+/// `working_dir` sets the child's current directory.  C thttpd `chdir()`s to
+/// the script's parent directory before `execve()` (legacy/src/libhttpd.c:3497),
+/// so a CGI that opens a relative path (e.g. `cat data.txt`) reads from its
+/// own directory.  Pass `None` to inherit the server's cwd.
 pub fn execute_cgi(
     script_path: &Path,
+    working_dir: Option<&Path>,
     env: Vec<(String, String)>,
     post_body: Option<&[u8]>,
 ) -> std::io::Result<CgiResult> {
     let is_nph = is_nph_script(&script_path.to_string_lossy());
+    let executable_path = if working_dir.is_some() && script_path.is_relative() {
+        std::env::current_dir()?.join(script_path)
+    } else {
+        script_path.to_path_buf()
+    };
 
-    let mut cmd = Command::new(script_path);
+    let mut cmd = Command::new(&executable_path);
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped()) // capture stderr for error reporting
         .env_clear();
+
+    if let Some(dir) = working_dir {
+        cmd.current_dir(dir);
+    }
 
     for (key, value) in env {
         cmd.env(key, value);
@@ -182,5 +197,108 @@ mod tests {
         // PATH must come first (matching C's order)
         assert_eq!(env[0].0, "PATH");
         assert_eq!(env[0].1, "/usr/local/bin:/usr/ucb:/bin:/usr/bin");
+    }
+
+    #[cfg(unix)]
+    fn make_executable(path: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(path, perms).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_cgi_cwd_is_script_dir() {
+        // A CGI that reads a relative path must read from its own directory —
+        // C chdir()s to the script's parent before execve().
+        let dir = tempfile::tempdir().unwrap();
+        // A data file sitting next to the script.
+        std::fs::write(dir.path().join("data.txt"), b"relative-data").unwrap();
+        // Script cats the relative file (uses $PWD after chdir).
+        let script = dir.path().join("show.cgi");
+        std::fs::write(&script, b"#!/bin/sh\ncat data.txt\n").unwrap();
+        make_executable(&script);
+
+        let result = execute_cgi(&script, Some(dir.path()), Vec::new(), None).unwrap();
+        let mut child = result.child;
+        let mut out = String::new();
+        use std::io::Read;
+        if let Some(mut stdout) = child.stdout.take() {
+            stdout.read_to_string(&mut out).unwrap();
+        }
+        let _ = child.wait();
+        assert_eq!(out.trim(), "relative-data");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_cgi_relative_script_path_survives_current_dir() {
+        let cwd = std::env::current_dir().unwrap();
+        let root = tempfile::tempdir_in(&cwd).unwrap();
+        let cgi_dir = root.path().join("cgi-bin");
+        std::fs::create_dir(&cgi_dir).unwrap();
+        std::fs::write(cgi_dir.join("data.txt"), b"relative-data").unwrap();
+
+        let script = cgi_dir.join("show.cgi");
+        std::fs::write(&script, b"#!/bin/sh\ncat data.txt\n").unwrap();
+        make_executable(&script);
+
+        let relative_script = script.strip_prefix(&cwd).unwrap();
+        let result = execute_cgi(relative_script, Some(&cgi_dir), Vec::new(), None).unwrap();
+        let mut child = result.child;
+        let mut out = String::new();
+        use std::io::Read;
+        if let Some(mut stdout) = child.stdout.take() {
+            stdout.read_to_string(&mut out).unwrap();
+        }
+        let _ = child.wait();
+        assert_eq!(out.trim(), "relative-data");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_cgi_cwd_none_inherits() {
+        // With working_dir = None, the child inherits the test process cwd.
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("pwd.cgi");
+        std::fs::write(&script, b"#!/bin/sh\npwd\n").unwrap();
+        make_executable(&script);
+
+        let result = execute_cgi(&script, None, Vec::new(), None).unwrap();
+        let mut child = result.child;
+        let mut out = String::new();
+        use std::io::Read;
+        if let Some(mut stdout) = child.stdout.take() {
+            stdout.read_to_string(&mut out).unwrap();
+        }
+        let _ = child.wait();
+        // Inherited cwd is the test's cwd, NOT the script dir.
+        assert_ne!(std::path::Path::new(out.trim()), dir.path());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_cgi_post_body_reaches_stdin() {
+        // A POST body written via execute_cgi must reach the CGI's stdin in
+        // full, including a large body read incrementally by the child.  This
+        // guards the stdin write-then-EOF path that lets a CGI drain a body
+        // across multiple of its own read() calls.
+        let dir = tempfile::tempdir().unwrap();
+        // wc -c counts stdin bytes; read in small chunks internally via cat.
+        let script = dir.path().join("echo.cgi");
+        std::fs::write(&script, b"#!/bin/sh\nwc -c\n").unwrap();
+        make_executable(&script);
+
+        let body = b"X".repeat(50_000); // large enough to span multiple pipe reads
+        let result = execute_cgi(&script, Some(dir.path()), Vec::new(), Some(&body)).unwrap();
+        let mut child = result.child;
+        let mut out = String::new();
+        use std::io::Read;
+        if let Some(mut stdout) = child.stdout.take() {
+            stdout.read_to_string(&mut out).unwrap();
+        }
+        let _ = child.wait();
+        assert_eq!(out.trim(), "50000");
     }
 }
