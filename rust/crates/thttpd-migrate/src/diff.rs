@@ -228,15 +228,26 @@ fn normalize_value(value: &str) -> String {
 /// Replace temp-directory paths with a canonical placeholder.
 fn normalize_paths(value: &str) -> String {
     // /tmp/thttpd_golden_XXX, /tmp/thttpd_diff_XXX, /tmp/pytest-XXX
+    let golden = "/tmp/thttpd_golden_";
+    let diff = "/tmp/thttpd_diff_";
     let mut out = String::with_capacity(value.len());
     let bytes = value.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        if value[i..].starts_with("/tmp/thttpd_golden_")
-            || value[i..].starts_with("/tmp/thttpd_diff_")
-        {
+        // Advance by the ACTUAL matched prefix length.  Previously this
+        // always advanced by the golden prefix length even when the (shorter)
+        // diff prefix matched, overshooting by 2 bytes and mis-consuming the
+        // trailing identifier run (or crossing into following path content).
+        let matched_len = if value[i..].starts_with(golden) {
+            Some(golden.len())
+        } else if value[i..].starts_with(diff) {
+            Some(diff.len())
+        } else {
+            None
+        };
+        if let Some(plen) = matched_len {
             out.push_str("/tmp/thttpd_NORMALIZED");
-            i += "/tmp/thttpd_golden_".len();
+            i += plen;
             // consume the trailing identifier run
             while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
                 i += 1;
@@ -611,6 +622,35 @@ mod tests {
         assert!(
             d.is_empty(),
             "CGI-port-only difference must normalize away: {d:?}"
+        );
+    }
+
+    #[test]
+    fn normalize_paths_advances_by_matched_prefix_len() {
+        // Regression: normalize_paths used to advance by the golden prefix
+        // length even when the (shorter) diff prefix matched, overshooting by
+        // 2 bytes and mis-consuming following content.
+        assert_eq!(
+            normalize_paths("/tmp/thttpd_golden_abc123"),
+            "/tmp/thttpd_NORMALIZED"
+        );
+        assert_eq!(
+            normalize_paths("/tmp/thttpd_diff_abc123"),
+            "/tmp/thttpd_NORMALIZED"
+        );
+        // Empty identifier: the old code ate "tc" from "/etc" here.
+        assert_eq!(
+            normalize_paths("/tmp/thttpd_diff_/etc/passwd"),
+            "/tmp/thttpd_NORMALIZED/etc/passwd"
+        );
+        assert_eq!(
+            normalize_paths("/tmp/thttpd_golden_/etc/passwd"),
+            "/tmp/thttpd_NORMALIZED/etc/passwd"
+        );
+        // diff and golden with identical suffixes must normalize identically.
+        assert_eq!(
+            normalize_paths("/tmp/thttpd_diff_99/idx.html"),
+            normalize_paths("/tmp/thttpd_golden_99/idx.html")
         );
     }
 
