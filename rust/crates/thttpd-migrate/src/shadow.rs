@@ -134,6 +134,15 @@ pub fn dispatch_shadow(
     let path = original_uri.path().to_string();
     let method_str = method.to_string();
     tokio::spawn(async move {
+        // Claim the shadow breaker probe HERE, at dispatch, so a primary-side
+        // failure that never reaches this task cannot leak a claimed probe
+        // (which would strand the shadow breaker HalfOpen forever — every
+        // path below records an outcome, so a claimed probe is always
+        // resolved). If admission loses the single probe slot to a concurrent
+        // caller, skip mirroring without recording (no probe was claimed).
+        if !pool.breaker_admit(&shadow.name) {
+            return;
+        }
         // Reconcile the shadow request framing with the (possibly capped)
         // body BEFORE rebuilding: the forwarded headers still carry the
         // original Content-Length, which would lie about a capped body and
@@ -203,8 +212,12 @@ pub fn dispatch_shadow(
                 // a divergence. `NotRoutable` is excluded: forward() checks the
                 // *primary* backend's routability (decision.backend), so it
                 // reflects the primary's health, not a shadow failure, and must
-                // not be charged to the shadow backend's breaker.
-                if !matches!(e, forwarder::ForwardError::NotRoutable) {
+                // not be charged to the shadow backend's breaker. We claimed a
+                // probe above, though, so release it without an outcome instead
+                // of leaking it HalfOpen.
+                if matches!(e, forwarder::ForwardError::NotRoutable) {
+                    pool.breaker_release_probe(&shadow.name);
+                } else {
                     pool.record_outcome(&shadow.name, false);
                 }
                 vec![Divergence {
@@ -305,6 +318,15 @@ mod tests {
         Arc::new(BackendPool::with_breaker_cfg(&backends, cfg))
     }
 
+    /// A sensitive breaker config: a single failure trips it.
+    fn sensitive_cfg() -> CircuitConfig {
+        CircuitConfig {
+            error_rate_threshold: 0.5,
+            window_secs: 30,
+            min_requests: 1,
+        }
+    }
+
     async fn spawn_responder(
         status: u16,
         body: &'static str,
@@ -393,6 +415,73 @@ mod tests {
         // Give the spawned task a moment, then re-assert the user body.
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         assert_eq!(&primary_body[..], b"primary");
+    }
+
+    #[tokio::test]
+    async fn dispatch_admits_and_resolves_cooled_shadow_probe() {
+        // Admit-at-dispatch: a cooled-open shadow backend's half-open probe is
+        // claimed INSIDE dispatch_shadow (not in router::decide) and resolved by
+        // the recorded shadow outcome. A successful shadow request closes the
+        // breaker; the probe slot is released after resolution.
+        let (paddr, _p) = spawn_responder(200, "primary").await;
+        let (saddr, _s) = spawn_responder(200, "shadow").await;
+        let primary = backend("c", &paddr.to_string());
+        let shadow = backend("rust", &saddr.to_string());
+        let pool = pool_with_cfg(
+            &[("c", &paddr.to_string()), ("rust", &saddr.to_string())],
+            sensitive_cfg(),
+        );
+        // Make "rust"'s breaker a cooled-open candidate for a half-open probe.
+        {
+            let b = pool.breakers.get("rust").unwrap();
+            b.record(false);
+            b.force_cooled();
+            assert!(b.can_route());
+            assert!(!b.probe_claimed());
+        }
+
+        let dec = decision(primary.clone(), shadow.clone());
+        let client = forwarder::build_client();
+        let primary_req = rebuild_for_backend(
+            &"/".parse().unwrap(),
+            &Method::GET,
+            &[],
+            Bytes::new(),
+            &paddr.to_string(),
+        );
+        let primary_resp = forwarder::forward(&dec, primary_req, &client)
+            .await
+            .unwrap();
+        let (parts, mut pb) = primary_resp.into_parts();
+        let primary_status = parts.status.as_u16();
+        let (primary_body, _t, _tr) = read_capped(&mut pb, 1024).await.unwrap();
+
+        dispatch_shadow(
+            dec,
+            Method::GET,
+            "/".parse().unwrap(),
+            vec![],
+            Bytes::new(),
+            primary_status,
+            vec![],
+            primary_body.clone(),
+            false,
+            client,
+            ShadowConfig::default(),
+            pool.clone(),
+        );
+        // Let the spawned shadow task run.
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        // The shadow probe was admitted at dispatch and the 200 outcome closed
+        // the breaker; the slot is released.
+        let b = pool.breakers.get("rust").unwrap();
+        assert_eq!(
+            b.state(),
+            crate::circuit::State::Closed,
+            "successful shadow probe should close the breaker"
+        );
+        assert!(!b.probe_claimed(), "probe slot released after resolution");
     }
 
     #[tokio::test]

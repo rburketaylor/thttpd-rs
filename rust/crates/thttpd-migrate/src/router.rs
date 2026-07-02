@@ -98,17 +98,16 @@ pub fn decide<B>(
     };
 
     let shadow = if matches!(routing.mode, RoutingMode::Shadow) {
-        // Shadow eligibility is checked non-mutating first, then the probe is
-        // claimed only on the shadow backend that will actually receive the
-        // mirrored request. If admission loses the single probe slot to a
-        // concurrent caller, skip mirroring for this request rather than
-        // leaking a probe.
+        // Shadow eligibility is checked non-mutating here. The probe is NOT
+        // claimed in decide() — it is claimed at actual shadow dispatch
+        // (shadow::dispatch_shadow), so a primary-side failure that skips
+        // shadow dispatch can never leak a claimed-but-unresolved half-open
+        // probe (which would strand the shadow breaker HalfOpen forever).
         routing
             .shadow_backend
             .as_deref()
             .and_then(|n| pool.get(n))
             .filter(|b| b.name != chosen.name && b.is_routable() && pool.breaker_can_route(&b.name))
-            .filter(|b| pool.breaker_admit(&b.name))
     } else {
         None
     };
@@ -382,6 +381,41 @@ mod tests {
         let routing = active_active();
         let req = Request::builder().body(()).unwrap();
         assert!(decide(&req, &pool, &routing).is_none());
+    }
+
+    #[test]
+    fn shadow_probe_not_claimed_until_dispatch() {
+        // Admit-at-dispatch: decide() must NOT claim the shadow backend's
+        // half-open probe. Before the fix, decide() called breaker_admit on the
+        // shadow, so a primary-side failure that skipped shadow dispatch left
+        // the shadow breaker HalfOpen with a claimed probe that could never
+        // resolve — stranding it forever. Now the probe is claimed only in
+        // dispatch_shadow.
+        let pool = pool_with_cfg(&[("a", 1), ("b", 1)], sensitive_cfg());
+        trip_and_cool(&pool, "b"); // b is a cooled-open shadow candidate
+        let routing = RoutingConfig {
+            mode: RoutingMode::Shadow,
+            primary_backend: Some("a".into()),
+            shadow_backend: Some("b".into()),
+            ..Default::default()
+        };
+        let req = Request::builder().body(()).unwrap();
+        let d = decide(&req, &pool, &routing).expect("primary routable");
+        assert_eq!(d.backend.name, "a");
+        assert_eq!(d.shadow.unwrap().name, "b");
+        // The shadow breaker must NOT have been promoted/admitted by decide().
+        let b_br = pool.breakers.get("b").unwrap();
+        assert_eq!(
+            b_br.state(),
+            State::Open,
+            "decide() must not claim the shadow probe"
+        );
+        assert!(
+            !b_br.probe_claimed(),
+            "decide() must not claim the shadow probe"
+        );
+        // It remains a valid candidate for dispatch to admit.
+        assert!(b_br.can_route());
     }
 
     #[test]

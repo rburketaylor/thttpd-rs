@@ -63,6 +63,22 @@ impl Breaker {
         }
     }
 
+    /// Release a claimed half-open probe **without** recording an outcome.
+    ///
+    /// Use when a probe was claimed via [`try_admit`] but the request never
+    /// reached the backend (e.g. the *primary* was not routable during shadow
+    /// mirroring, so the shadow backend was never contacted). Recording a
+    /// synthetic success/failure would be wrong — instead this unclaims the
+    /// slot and reverts HalfOpen→Open with a fresh cool-off so the next cycle
+    /// can retry. A no-op when no probe is claimed (e.g. Closed breaker).
+    pub fn release_probe(&self) {
+        if self.state() == State::HalfOpen {
+            self.probe_in_flight.store(false, Ordering::Release);
+            // Revert to Open and restart the cool-off clock.
+            self.trip();
+        }
+    }
+
     /// Record a request outcome and update circuit state.
     pub fn record(&self, success: bool) {
         // If half-open: a single outcome resolves the probe. Release the probe

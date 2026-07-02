@@ -99,6 +99,14 @@ impl BackendPool {
             .unwrap_or(true)
     }
 
+    /// Release a claimed probe for `name` without recording an outcome.
+    /// See [`crate::circuit::Breaker::release_probe`].
+    pub fn breaker_release_probe(&self, name: &str) {
+        if let Some(b) = self.breakers.get(name) {
+            b.release_probe();
+        }
+    }
+
     /// True if the backend's circuit breaker currently allows traffic.
     ///
     /// **Deprecated for routing paths.** This is side-effectful (it claims a
