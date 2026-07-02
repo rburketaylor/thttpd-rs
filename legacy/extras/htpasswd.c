@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
@@ -27,7 +28,9 @@ extern char *crypt(const char *key, const char *setting);
 #define MAX_STRING_LEN 256
 
 int tfd;
-char temp_template[] = "/tmp/htp.XXXXXX";
+/* Temp path is built per-run adjacent to the destination (see main()) so
+** the final replace is an atomic rename() on one filesystem — no shell. */
+char temp_template[MAX_STRING_LEN + 32];
 
 void interrupted(int);
 
@@ -161,8 +164,9 @@ int main(int argc, char *argv[]) {
     char line[MAX_STRING_LEN];
     char l[MAX_STRING_LEN];
     char w[MAX_STRING_LEN];
-    char command[MAX_STRING_LEN];
     int found;
+    struct stat pwstat;
+    struct stat tempstat;
 
     tfd = -1;
     signal(SIGINT,(void (*)(int))interrupted);
@@ -179,11 +183,9 @@ int main(int argc, char *argv[]) {
 	    fprintf(stderr, "%s: filename is too long\n", argv[0]);
 	    exit(1);
 	}
-	if (((strchr(argv[2], ';')) != NULL) || ((strchr(argv[2], '>')) != NULL)) {
-	    fprintf(stderr, "%s: filename contains an illegal character\n",
-		argv[0]);
-	    exit(1);
-	}
+	/* No shell is used anywhere in htpasswd (the update path renames a
+	** temp file), so filename characters like spaces, ';' or '>' are safe
+	** and no longer rejected. */
 	if (strlen(argv[3]) > (sizeof(user) - 1)) {
 	    fprintf(stderr, "%s: username is too long\n", argv[0]);
 	    exit(1);
@@ -199,19 +201,12 @@ int main(int argc, char *argv[]) {
 	exit(0);
     } else if(argc != 3) usage();
 
-    tfd = mkstemp(temp_template);
-    if(!(tfp = fdopen(tfd,"w"))) {
-	fprintf(stderr,"Could not open temp file.\n");
-	exit(1);
-    }
-
+    /* Build the temp path ADJACENT to the destination so the final move is
+    ** an atomic rename() on one filesystem — no shell, no cp, and no
+    ** cross-filesystem copy.  The old code used system("cp ...") which
+    ** allowed shell injection via the destination path. */
     if (strlen(argv[1]) > (sizeof(pwfilename) - 1)) {
 	fprintf(stderr, "%s: filename is too long\n", argv[0]);
-	exit(1);
-    }
-    if (((strchr(argv[1], ';')) != NULL) || ((strchr(argv[1], '>')) != NULL)) {
-	fprintf(stderr, "%s: filename contains an illegal character\n",
-		argv[0]);
 	exit(1);
     }
     if (strlen(argv[2]) > (sizeof(user) - 1)) {
@@ -223,10 +218,34 @@ int main(int argc, char *argv[]) {
 		argv[0]);
 	exit(1);
     }
+    if(stat(argv[1],&pwstat) != 0) {
+	fprintf(stderr,
+		"Could not stat passwd file %s.\n",argv[1]);
+	fprintf(stderr,"Use -c option to create new one.\n");
+	perror("stat");
+	exit(1);
+    }
+    snprintf(temp_template, sizeof(temp_template), "%s.tmpXXXXXX", argv[1]);
+    tfd = mkstemp(temp_template);
+    if(tfd == -1) {
+	fprintf(stderr,"Could not create temp file.\n");
+	perror("mkstemp");
+	exit(1);
+    }
+    if(!(tfp = fdopen(tfd,"w"))) {
+	fprintf(stderr,"Could not open temp file.\n");
+	perror("fdopen");
+	close(tfd);
+	unlink(temp_template);
+	exit(1);
+    }
+
     if(!(f = fopen(argv[1],"r"))) {
 	fprintf(stderr,
 		"Could not open passwd file %s for reading.\n",argv[1]);
 	fprintf(stderr,"Use -c option to create new one.\n");
+	fclose(tfp);
+	unlink(temp_template);
 	exit(1);
     }
     strcpy(user,argv[2]);
@@ -254,9 +273,43 @@ int main(int argc, char *argv[]) {
 	add_password(user,tfp);
     }
     fclose(f);
-    fclose(tfp);
-    sprintf(command,"cp %s %s",temp_template,argv[1]);
-    system(command);
-    unlink(temp_template);
+    if(fflush(tfp) != 0) {
+	perror("fflush");
+	fclose(tfp);
+	unlink(temp_template);
+	exit(1);
+    }
+    if(fstat(tfd,&tempstat) != 0) {
+	perror("fstat");
+	fclose(tfp);
+	unlink(temp_template);
+	exit(1);
+    }
+    if((tempstat.st_uid != pwstat.st_uid || tempstat.st_gid != pwstat.st_gid) &&
+       fchown(tfd,pwstat.st_uid,pwstat.st_gid) != 0) {
+	perror("fchown");
+	fclose(tfp);
+	unlink(temp_template);
+	exit(1);
+    }
+    if(fchmod(tfd,pwstat.st_mode & 07777) != 0) {
+	perror("fchmod");
+	fclose(tfp);
+	unlink(temp_template);
+	exit(1);
+    }
+    if(fclose(tfp) != 0) {
+	perror("fclose");
+	unlink(temp_template);
+	exit(1);
+    }
+    /* Atomically replace the destination with the completed temp file.
+    ** rename() is POSIX-atomic and invokes no shell, so the destination
+    ** path may safely contain spaces or shell metacharacters. */
+    if(rename(temp_template,argv[1]) != 0) {
+	perror("rename");
+	unlink(temp_template);
+	exit(1);
+    }
     exit(0);
 }

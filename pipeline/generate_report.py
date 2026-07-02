@@ -240,7 +240,16 @@ def main():
         baseline = json.load(f)
 
     diff_results = None
-    if args.diff_results and os.path.isfile(args.diff_results):
+    if args.diff_results:
+        # An explicitly-requested diff file that is missing is an error, not a
+        # silent fallback to a baseline-only report — otherwise a typo'd path
+        # (or a failed differential run producing no output) hides the problem.
+        if not os.path.isfile(args.diff_results):
+            print(
+                f"ERROR: Diff results not found at {args.diff_results}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         with open(args.diff_results) as f:
             diff_results = json.load(f)
 
