@@ -96,6 +96,9 @@ async fn handle_conn(
     state_path: std::sync::Arc<std::path::PathBuf>,
 ) -> anyhow::Result<()> {
     let req = read_request(&mut stream).await?;
+    // Serialize against other control handlers and the periodic state writer
+    // so the ArcSwap read-modify-write + snapshot + atomic write is atomic.
+    let _guard = state.control_lock.lock().await;
     let resp = match req {
         ControlRequest::SetWeight { weights } => match state.set_weights(&pool, &weights) {
             Ok(()) => {
@@ -197,6 +200,9 @@ pub fn spawn_state_writer(
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
         loop {
             tick.tick().await;
+            // Hold the shared control lock so the snapshot is consistent with
+            // any in-flight mutating control command (no torn state.json).
+            let _guard = state.control_lock.lock().await;
             let snap = snapshot(&state, &pool);
             if let Err(e) = write_state_atomic(&state_path, &snap) {
                 tracing::warn!(error = %e, "state file write failed");
@@ -417,6 +423,91 @@ mod tests {
         let resp = client_set_weight(&sock, w).await.unwrap();
         assert!(!resp.ok);
         assert!(resp.message.contains("unknown backend"));
+        drop(state);
+    }
+
+    #[tokio::test]
+    async fn concurrent_partial_set_weights_keep_config_and_pool_consistent() {
+        // Concurrent PARTIAL updates targeting different backends expose the
+        // ArcSwap read-modify-write lost-update: without the control lock, one
+        // command's config-snapshot store overwrites the other, so the config
+        // weights and the live pool weights end up disagreeing. The shared
+        // async mutex serializes mutating commands so config and pool stay
+        // consistent.
+        let dir = tempfile::tempdir().unwrap();
+        let (state, pool, sock) = spawn_test_server(dir.path()).await;
+
+        let mut handles = Vec::new();
+        for i in 0..60u32 {
+            let sock = sock.clone();
+            let mut w = HashMap::new();
+            if i % 2 == 0 {
+                w.insert("c".to_string(), 10 + i);
+            } else {
+                w.insert("rust".to_string(), 20 + i);
+            }
+            handles.push(tokio::spawn(async move {
+                client_set_weight(&sock, w).await.unwrap()
+            }));
+        }
+        for h in handles {
+            let resp = h.await.unwrap();
+            assert!(resp.ok, "set-weight failed: {}", resp.message);
+        }
+
+        // The config snapshot and the pool must agree on every backend.
+        let snap_cfg = state.config.load();
+        for b in pool.iter() {
+            let cfg_w = snap_cfg.backends.get(&b.name).map(|c| c.weight);
+            assert_eq!(
+                cfg_w,
+                Some(b.weight()),
+                "config/pool weight mismatch for {} (lost update)",
+                b.name
+            );
+        }
+        drop(state);
+    }
+
+    #[tokio::test]
+    async fn state_writer_serialized_with_control_commands() {
+        // The periodic state writer must take the same control lock so its
+        // snapshot is consistent with in-flight mutations. Run the writer and
+        // a burst of set-weight commands concurrently and assert every state.json
+        // read back is valid JSON and reflects a non-zero-total config.
+        let dir = tempfile::tempdir().unwrap();
+        let (state, pool, sock) = spawn_test_server(dir.path()).await;
+        let state_path = dir.path().join("state.json");
+
+        let writer = spawn_state_writer(
+            state.clone(),
+            pool.clone(),
+            std::sync::Arc::new(state_path.clone()),
+        );
+
+        let mut handles = Vec::new();
+        for i in 0..40u32 {
+            let sock = sock.clone();
+            let mut w = HashMap::new();
+            w.insert("c".to_string(), 50 + (i % 10));
+            w.insert("rust".to_string(), 50 + (i % 7));
+            handles.push(tokio::spawn(async move {
+                client_set_weight(&sock, w).await.unwrap()
+            }));
+        }
+        // While commands run, repeatedly read state.json — it must always be
+        // valid JSON (never a partial write).
+        for _ in 0..20 {
+            if let Ok(text) = std::fs::read_to_string(&state_path) {
+                let v: serde_json::Value = serde_json::from_str(&text).expect("torn state.json");
+                assert!(v["backends"].is_array());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+        for h in handles {
+            assert!(h.await.unwrap().ok);
+        }
+        writer.abort();
         drop(state);
     }
 

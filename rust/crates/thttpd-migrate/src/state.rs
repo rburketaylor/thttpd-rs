@@ -24,6 +24,14 @@ pub struct LiveState {
     pub draining: Arc<AtomicBool>,
     drain_grace: AtomicU64,
     pub started_at: Instant,
+    /// Serializes mutating control commands (set-weight / rollback / drain) and
+    /// state-snapshot writes so a concurrent control handler and the periodic
+    /// state writer can't interleave: the `ArcSwap` read-modify-write in
+    /// [`set_weights`]/[`rollback`] and the `state.json` snapshot+write are each
+    /// performed while holding this lock, preventing lost updates and torn
+    /// snapshots. Async because it is held across the snapshot+write in async
+    /// control/state-writer tasks.
+    pub control_lock: tokio::sync::Mutex<()>,
 }
 
 impl LiveState {
@@ -33,6 +41,7 @@ impl LiveState {
             draining: Arc::new(AtomicBool::new(false)),
             drain_grace: AtomicU64::new(DEFAULT_DRAIN_GRACE_SECS),
             started_at: Instant::now(),
+            control_lock: tokio::sync::Mutex::new(()),
         }
     }
     pub fn start_drain(&self) {
